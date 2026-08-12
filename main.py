@@ -342,7 +342,7 @@ def _bewerten_html(pid=''):
 
 
 # ── Verwalten (Aufgaben, Team, Import/Export) ────────────────────────────────
-def _verwalten_html():
+def _verwalten_html(meldung=''):
     aufgaben = _aufgaben()
     personen = _personen()
 
@@ -370,6 +370,7 @@ def _verwalten_html():
     return (
         _platte('Aufgaben und Team pflegen')
         + _subtabs('verwalten')
+        + meldung
         + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px">'
         # Aufgaben
         '<div class="card"><h2 style="margin-top:0">Aufgaben</h2>'
@@ -391,8 +392,10 @@ def _verwalten_html():
         # Import / Export
         + '<div class="sect"><h2>Excel</h2><div class="rule"></div></div>'
         '<div class="card"><p class="hint" style="margin-top:0">Import: Excel/CSV mit einer Spalte '
-        '<b>Aufgabe</b> (erkannt werden auch „Tätigkeit", „Task", „Bezeichnung"); optionale Spalte '
-        '<b>Bereich</b> („Kategorie", „Gruppe"). Ohne Kopfzeile wird die erste Spalte als Aufgabe genommen. '
+        '<b>Aufgabe</b> (erkannt werden auch „Name", „Tätigkeit", „Task", „Bezeichnung"); optionale '
+        'Spalte <b>Bereich</b> („Section", „Column", „Kategorie", „Gruppe") und optionale Spalte '
+        '<b>Assignee</b> („Bearbeiter", „Verantwortlich"). Genannte Assignees werden automatisch als '
+        'Person angelegt und ihre Aufgaben direkt auf <b>grün</b> gesetzt (jederzeit änderbar). '
         'Vorhandene Aufgaben bleiben erhalten, Doppelte werden übersprungen.</p>'
         '<form method="post" action="/import" enctype="multipart/form-data" class="row" style="gap:8px">'
         '<input type="file" name="datei" accept=".xlsx,.xlsm,.csv" required>'
@@ -436,8 +439,22 @@ async def bewerten_speichern(request: Request):
 
 
 @app.get('/verwalten', response_class=HTMLResponse)
-def verwalten(request: Request):
-    return HTMLResponse(_seite(_verwalten_html(), request.state.user))
+def verwalten(request: Request, neu: str = '', pers: str = '', gruen: str = '', fehler: str = ''):
+    meldung = ''
+    if fehler:
+        meldung = ('<div class="card" style="border-left:4px solid #dc2626;margin-bottom:14px">'
+                   '<p style="margin:0">Import fehlgeschlagen – bitte eine .xlsx- oder .csv-Datei wählen.</p></div>')
+    elif neu or pers or gruen:
+        teile = []
+        if neu:
+            teile.append(f'<b>{_esc(neu)}</b> neue Aufgaben')
+        if pers and pers != '0':
+            teile.append(f'<b>{_esc(pers)}</b> neue Personen')
+        if gruen and gruen != '0':
+            teile.append(f'<b>{_esc(gruen)}</b>&times; „grün" aus Assignee gesetzt')
+        meldung = ('<div class="card" style="border-left:4px solid #16a34a;margin-bottom:14px">'
+                   f'<p style="margin:0">Import übernommen: {", ".join(teile) or "nichts Neues"}.</p></div>')
+    return HTMLResponse(_seite(_verwalten_html(meldung), request.state.user))
 
 
 @app.post('/aufgabe')
@@ -517,33 +534,81 @@ async def importieren(request: Request, datei: UploadFile = File(...)):
     if not zeilen:
         return RedirectResponse('/verwalten', status_code=303)
 
-    # Kopfzeile suchen
-    kopf = [c.lower() for c in zeilen[0]]
-    i_auf = i_ber = None
-    for i, h in enumerate(kopf):
-        if i_auf is None and any(x in h for x in ('aufgabe', 'tätigkeit', 'taetigkeit', 'task', 'bezeichnung')):
-            i_auf = i
-        if i_ber is None and any(x in h for x in ('bereich', 'kategorie', 'gruppe')):
-            i_ber = i
+    # Kopfzeile in den ersten Zeilen suchen (Excel hat oft eine Leerzeile davor).
+    # Erkannt werden: Aufgabe (auch „Name"/„Tätigkeit"/„Task"), Bereich (auch
+    # „Section"/„Column"/„Kategorie") und Person (auch „Assignee"/„Bearbeiter").
+    i_auf = i_ber = i_pers = None
+    kopf_idx = None
+    for zi, zeile in enumerate(zeilen[:6]):
+        hs = [c.lower() for c in zeile]
+        auf = ber = pers = None
+        for i, h in enumerate(hs):
+            if pers is None and any(x in h for x in ('assignee', 'zugewiesen', 'mitarbeiter',
+                                                     'verantwortlich', 'bearbeiter', 'zuständig',
+                                                     'zustaendig', 'wer macht')):
+                pers = i
+            elif auf is None and any(x in h for x in ('aufgabe', 'tätigkeit', 'taetigkeit',
+                                                      'task', 'bezeichnung', 'name')):
+                auf = i
+            elif ber is None and any(x in h for x in ('bereich', 'kategorie', 'gruppe',
+                                                      'section', 'column', 'spalte')):
+                ber = i
+        if auf is not None:
+            i_auf, i_ber, i_pers, kopf_idx = auf, ber, pers, zi
+            break
+
     if i_auf is None:
         i_auf = 0
-        datenzeilen = zeilen  # keine Kopfzeile erkannt
+        datenzeilen = zeilen  # keine Kopfzeile erkannt → erste Spalte = Aufgabe
     else:
-        datenzeilen = zeilen[1:]
+        datenzeilen = zeilen[kopf_idx + 1:]
 
-    liste = _aufgaben()
-    vorhanden = {(a.get('name') or '').strip().lower() for a in liste}
-    neu = 0
+    aufgaben = _aufgaben()
+    personen = _personen()
+    bew = _bewertungen()
+    # Schlüssel = Bereich + Name: derselbe Name (z. B. ein Portal) kann in
+    # mehreren Bereichen eine eigene Aufgabe sein.
+    def _akey(ber, name):
+        return f'{(ber or "").strip().lower()}||{(name or "").strip().lower()}'
+    auf_by_name = {_akey(a.get('bereich'), a.get('name')): a for a in aufgaben}
+    pers_by_name = {(p.get('name') or '').strip().lower(): p for p in personen}
+
+    neu_auf = neu_pers = gesetzt = 0
     for z in datenzeilen:
-        name = (z[i_auf] if i_auf < len(z) else '').strip()
-        if not name or name.lower() in vorhanden:
+        name = (z[i_auf].strip() if (i_auf is not None and i_auf < len(z)) else '')
+        if not name:
             continue
         ber = (z[i_ber].strip() if (i_ber is not None and i_ber < len(z)) else '')
-        liste.append({'id': secrets.token_hex(5), 'name': name, 'bereich': ber})
-        vorhanden.add(name.lower())
-        neu += 1
-    _sichere(AUFGABEN_PATH, liste)
-    return RedirectResponse(f'/verwalten?neu={neu}', status_code=303)
+        key = _akey(ber, name)
+        a = auf_by_name.get(key)
+        if a is None:
+            a = {'id': secrets.token_hex(5), 'name': name, 'bereich': ber}
+            aufgaben.append(a)
+            auf_by_name[key] = a
+            neu_auf += 1
+
+        # Assignee → als Person anlegen und diese Aufgabe direkt auf „grün"
+        # (wer eine Aufgabe heute macht, kann sie). Jederzeit änderbar.
+        ass = (z[i_pers].strip() if (i_pers is not None and i_pers < len(z)) else '')
+        if ass:
+            pkey = ass.lower()
+            p = pers_by_name.get(pkey)
+            if p is None:
+                p = {'id': secrets.token_hex(5), 'name': ass}
+                personen.append(p)
+                pers_by_name[pkey] = p
+                neu_pers += 1
+            eintrag = bew.get(str(a['id'])) or {}
+            if eintrag.get(str(p['id'])) != 'gruen':
+                eintrag[str(p['id'])] = 'gruen'
+                bew[str(a['id'])] = eintrag
+                gesetzt += 1
+
+    _sichere(AUFGABEN_PATH, aufgaben)
+    _sichere(PERSONEN_PATH, personen)
+    _sichere(BEWERTUNG_PATH, bew)
+    return RedirectResponse(
+        f'/verwalten?neu={neu_auf}&pers={neu_pers}&gruen={gesetzt}', status_code=303)
 
 
 @app.get('/export.xlsx')
