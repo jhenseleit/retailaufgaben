@@ -395,6 +395,15 @@ def _verwalten_html(meldung='', is_admin=False):
                 f'<form method="post" action="/aufgabe/{_esc(a["id"])}/loeschen" '
                 'onsubmit="return confirm(\'Aufgabe löschen? Auch alle Bewertungen dazu.\')">'
                 '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
+        if b:
+            a_zeilen += (
+                '<form method="post" action="/aufgabe" class="row" style="gap:6px;'
+                'padding:5px 0 12px 18px;margin:0;border-bottom:1px solid var(--line)">'
+                f'<input type="hidden" name="bereich" value="{_esc(b)}">'
+                '<input name="name" placeholder="+ Unteraufgabe hinzufügen" required '
+                'style="flex:1;min-width:150px;padding:7px 10px;border:1px solid #d5dde5;'
+                'border-radius:7px;font:inherit">'
+                '<button class="btn secondary btn-sm" type="submit">hinzufügen</button></form>')
 
     n = len(personen)
     p_zeilen = ''
