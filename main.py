@@ -155,15 +155,18 @@ def _seite(inhalt, user=None):
         '.mtx{width:100%;border-collapse:collapse;font-size:13px}'
         '.mtx th,.mtx td{border:1px solid var(--line);padding:7px 9px;text-align:center;vertical-align:middle}'
         '.mtx th{background:#f4f2fb;position:sticky;top:0}'
-        '.mtx td.auf{text-align:left;min-width:220px}.mtx td.auf b{font-weight:600}'
-        '.mtx .ber{background:#faf9fe;text-align:left;font-family:var(--cond);text-transform:uppercase;'
-        'letter-spacing:.06em;font-size:11px;color:var(--muted)}'
+        '.mtx td.auf{text-align:left;min-width:240px;font-weight:400;padding-left:26px;position:relative}'
+        '.mtx td.auf::before{content:"–";position:absolute;left:11px;color:var(--muted)}'
+        '.mtx .ber{background:#f0ecfa;text-align:left;font-weight:700;font-size:13.5px;color:var(--ink)}'
         '.dot{display:inline-block;width:15px;height:15px;border-radius:50%;border:1px solid rgba(0,0,0,.12)}'
         '.dot.none{background:#eef1f4}'
         '.chip2{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600}'
         '.arow{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}'
         '.arow .an{flex:1;min-width:200px;font-size:14px}'
-        '.arow .an .ber2{color:var(--muted);font-size:11px;font-family:var(--cond);text-transform:uppercase;letter-spacing:.05em}'
+        '.arow.tp .an{padding-left:18px;position:relative}'
+        '.arow.tp .an::before{content:"–";position:absolute;left:2px;color:var(--muted)}'
+        '.grp{font-weight:700;font-size:14.5px;color:var(--ink);margin:18px 0 2px;padding-top:8px;'
+        'border-top:1px solid var(--line)}.grp:first-child{border-top:0;margin-top:2px}'
         '.ampel{display:flex;gap:6px;flex-wrap:wrap}'
         '.ampel input{width:auto;height:auto;margin:0}'
         '.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid var(--line);'
@@ -278,7 +281,7 @@ def _matrix_html():
                 else:
                     stat = '<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">ok</span>'
                 zellen = ''.join(f'<td>{_dot(stufe(a["id"], p["id"]))}</td>' for p in personen)
-                zeilen += (f'<tr><td class="auf"><b>{_esc(a["name"])}</b></td>{zellen}'
+                zeilen += (f'<tr><td class="auf">{_esc(a["name"])}</td>{zellen}'
                            f'<td>{g}</td><td>{stat}</td></tr>')
         koerper = (f'<div class="card"><div class="tscroll"><table class="mtx"><thead><tr>{kopf}</tr>'
                    f'</thead><tbody>{zeilen}</tbody></table></div>'
@@ -317,26 +320,35 @@ def _bewerten_html(pid=''):
         return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten') + auswahl
                 + '<div class="card"><p class="hint" style="margin:0">Noch keine Aufgaben angelegt.</p></div>')
 
-    meine = bew.get('_dummy')  # noqa: F841  (klarere Lesbarkeit unten)
-    rows = ''
+    # nach Hauptaufgabe gruppieren (Reihenfolge des ersten Vorkommens)
+    bereiche, gesehen = [], set()
     for a in aufgaben:
-        cur = (bew.get(str(a['id'])) or {}).get(pid, '')
-        ber = f'<span class="ber2">{_esc(a["bereich"])}</span> ' if a.get('bereich') else ''
+        b = (a.get('bereich') or '').strip()
+        if b not in gesehen:
+            gesehen.add(b)
+            bereiche.append(b)
 
-        def radio(val, cls, label):
-            ch = ' checked' if cur == val else ''
-            return (f'<label class="pill {cls}"><input type="radio" name="t{a["id"]}" '
-                    f'value="{val}"{ch}>{label}</label>')
+    rows = ''
+    for b in bereiche:
+        if b:
+            rows += f'<div class="grp">{_esc(b)}</div>'
+        for a in [x for x in aufgaben if (x.get('bereich') or '').strip() == b]:
+            cur = (bew.get(str(a['id'])) or {}).get(pid, '')
 
-        rows += (
-            '<div class="arow">'
-            f'<div class="an">{ber}{_esc(a["name"])}</div>'
-            '<div class="ampel">'
-            + radio('gruen', 'g', 'kann ich')
-            + radio('gelb', 'y', 'brauche Hilfe')
-            + radio('rot', 'r', 'kann ich nicht')
-            + radio('', 'n', '—')
-            + '</div></div>')
+            def radio(val, cls, label, _a=a, _cur=cur):
+                ch = ' checked' if _cur == val else ''
+                return (f'<label class="pill {cls}"><input type="radio" name="t{_a["id"]}" '
+                        f'value="{val}"{ch}>{label}</label>')
+
+            rows += (
+                '<div class="arow tp">'
+                f'<div class="an">{_esc(a["name"])}</div>'
+                '<div class="ampel">'
+                + radio('gruen', 'g', 'kann ich')
+                + radio('gelb', 'y', 'brauche Hilfe')
+                + radio('rot', 'r', 'kann ich nicht')
+                + radio('', 'n', '—')
+                + '</div></div>')
 
     schnell = (
         '<form method="post" action="/bewerten/pauschal" '
@@ -365,15 +377,24 @@ def _verwalten_html(meldung='', is_admin=False):
     aufgaben = _aufgaben()
     personen = _personen()
 
-    a_zeilen = ''
+    bereiche_a, gesehen_a = [], set()
     for a in aufgaben:
-        ber = f' <span class="fh">· {_esc(a["bereich"])}</span>' if a.get('bereich') else ''
-        a_zeilen += (
-            f'<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--line);'
-            f'padding:7px 0;margin:0"><span>{_esc(a["name"])}{ber}</span>'
-            f'<form method="post" action="/aufgabe/{_esc(a["id"])}/loeschen" '
-            'onsubmit="return confirm(\'Aufgabe löschen? Auch alle Bewertungen dazu.\')">'
-            '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
+        b = (a.get('bereich') or '').strip()
+        if b not in gesehen_a:
+            gesehen_a.add(b)
+            bereiche_a.append(b)
+    a_zeilen = ''
+    for b in bereiche_a:
+        if b:
+            a_zeilen += f'<div class="grp">{_esc(b)}</div>'
+        for a in [x for x in aufgaben if (x.get('bereich') or '').strip() == b]:
+            a_zeilen += (
+                '<div class="row" style="justify-content:space-between;align-items:center;'
+                'border-bottom:1px solid var(--line);padding:7px 0 7px 18px;margin:0">'
+                f'<span>&ndash; {_esc(a["name"])}</span>'
+                f'<form method="post" action="/aufgabe/{_esc(a["id"])}/loeschen" '
+                'onsubmit="return confirm(\'Aufgabe löschen? Auch alle Bewertungen dazu.\')">'
+                '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
 
     n = len(personen)
     p_zeilen = ''
