@@ -36,6 +36,8 @@ AUFGABEN_PATH = DATA_DIR / 'aufgaben.json'
 PERSONEN_PATH = DATA_DIR / 'personen.json'
 BEWERTUNG_PATH = DATA_DIR / 'bewertung.json'
 HISTORIE_PATH = DATA_DIR / 'historie.json'
+NOTIZEN_PATH = DATA_DIR / 'notizen.json'        # {'tid|pid': [{ts, text}]}
+MASSNAHMEN_PATH = DATA_DIR / 'massnahmen.json'  # {'tid|pid': {termin, pate, status, erstellt}}
 AUDIT_DB = DATA_DIR / 'audit.db'
 
 # Ampelstufen: Schlüssel -> (Farbe, kurz, lang)
@@ -104,6 +106,29 @@ def _historie_add(events):
     if len(h) > 3000:
         h = h[-3000:]
     _sichere(HISTORIE_PATH, h)
+
+
+def _notizen():
+    d = _lade(NOTIZEN_PATH, {})
+    return d if isinstance(d, dict) else {}
+
+
+def _massnahmen():
+    d = _lade(MASSNAHMEN_PATH, {})
+    return d if isinstance(d, dict) else {}
+
+
+def _ckey(tid, pid):
+    return f'{tid}|{pid}'
+
+
+def _tage_her(ts):
+    """Ganze Tage seit einem 'YYYY-MM-DD ...'-Zeitstempel (oder None)."""
+    try:
+        d = datetime.strptime(str(ts)[:10], '%Y-%m-%d')
+        return (datetime.now() - d).days
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _esc(s):
@@ -249,8 +274,26 @@ def _matrix_html(is_admin=False):
                 'Lege sie unter <a href="/verwalten">Aufgaben &amp; Team</a> an oder importiere deine '
                 'Excel-Tabelle.</p></div>')
 
+    massn = _massnahmen()
+    notz = _notizen()
+
     def stufe(tid, pid):
         return (bew.get(str(tid)) or {}).get(str(pid), '')
+
+    def zelle(tid, pid):
+        s = stufe(tid, pid)
+        ck = _ckey(tid, pid)
+        mark = ''
+        m = massn.get(ck)
+        if m and m.get('status') != 'erledigt' and (m.get('termin') or m.get('pate')):
+            mark += '<span title="Maßnahme geplant" style="color:#7c3aed">&#9679;</span>'
+        if notz.get(ck):
+            mark += '<span title="Notiz vorhanden" style="color:#6b7280">&#9998;</span>'
+        inner = _dot(s) + (f'<span style="margin-left:3px;font-size:10px">{mark}</span>' if mark else '')
+        if is_admin:
+            return (f'<td><a href="/zelle/{_esc(tid)}/{_esc(pid)}" '
+                    f'style="text-decoration:none;display:inline-block">{inner}</a></td>')
+        return f'<td>{inner}</td>'
 
     # Schulungsbedarf: Aufgaben mit < 2 „grün" sind Vertretungsrisiko
     krit, risk = [], []
@@ -301,13 +344,18 @@ def _matrix_html(is_admin=False):
                     stat = '<span class="chip2" style="background:#fdf3d6;color:#8a5a00">Risiko</span>'
                 else:
                     stat = '<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">ok</span>'
-                zellen = ''.join(f'<td>{_dot(stufe(a["id"], p["id"]))}</td>' for p in personen)
+                zellen = ''.join(zelle(a['id'], p['id']) for p in personen)
                 zeilen += (f'<tr><td class="auf">{_esc(a["name"])}</td>{zellen}'
                            f'<td>{g}</td><td>{stat}</td></tr>')
+        klick_hint = ('<p class="hint" style="margin:10px 0 0">Tipp: Klick auf einen Ampelpunkt öffnet '
+                      'Notizen &amp; Maßnahme (Termin, Pate) für diese Aufgabe/Person. '
+                      '<span style="color:#7c3aed">&#9679;</span> = Maßnahme geplant, '
+                      '<span style="color:#6b7280">&#9998;</span> = Notiz.</p>') if is_admin else ''
         koerper = (f'<div class="card"><div class="tscroll"><table class="mtx"><thead><tr>{kopf}</tr>'
                    f'</thead><tbody>{zeilen}</tbody></table></div>'
                    '<div class="row" style="margin-top:12px">'
-                   '<a class="btn secondary" href="/export.xlsx">Als Excel exportieren</a></div></div>')
+                   '<a class="btn secondary" href="/export.xlsx">Als Excel exportieren</a></div>'
+                   f'{klick_hint}</div>')
 
     return (_platte('Ampelmatrix: wer kann welche Aufgabe – für Urlaubs- und Krankheitsvertretung')
             + _subtabs('matrix', is_admin) + _legende() + warn + koerper)
@@ -537,6 +585,105 @@ def _verlauf_html(f=''):
     pname = {str(p['id']): p.get('name', '?') for p in personen}
     tinfo = {str(a['id']): (a.get('name') or '', a.get('bereich') or '') for a in aufgaben}
     n = len(aufgaben)
+    massn = _massnahmen()
+
+    def stufe(tid, pid):
+        return (bew.get(str(tid)) or {}).get(str(pid), '')
+
+    # ── Wochen-Report (letzte 7 Tage) + aktuelle Abdeckung ──
+    gelernt7 = rueck7 = 0
+    for e in hist:
+        th = _tage_her(e.get('ts'))
+        if th is not None and th <= 7:
+            d = RANG.get(e.get('neu', ''), 0) - RANG.get(e.get('alt', ''), 0)
+            if d > 0:
+                gelernt7 += 1
+            elif d < 0:
+                rueck7 += 1
+    krit = risk = 0
+    for a in aufgaben:
+        g = sum(1 for p in aktive if stufe(a['id'], p['id']) == 'gruen')
+        if g == 0:
+            krit += 1
+        elif g == 1:
+            risk += 1
+    wochen_card = (
+        '<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">'
+        f'<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">{gelernt7}&times; gelernt (7 Tage)</span>'
+        f'<span class="chip2" style="background:#fdecec;color:#b42318">{rueck7}&times; Rückschritt (7 Tage)</span>'
+        '<span style="color:var(--line)">|</span>'
+        f'<span class="chip2" style="background:#fde8e8;color:#a10e0e">{krit} kritisch</span>'
+        f'<span class="chip2" style="background:#fdf3d6;color:#8a5a00">{risk} Risiko</span>'
+        f'<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">{len(aufgaben) - krit - risk} abgedeckt (≥ 2)</span>'
+        '</div>')
+
+    # ── Vertretungs-Warnung: Aufgaben mit < 2 grün, längste ohne Bewegung zuerst ──
+    risiko = []
+    for a in aufgaben:
+        tid = str(a['id'])
+        g = sum(1 for p in aktive if stufe(tid, p['id']) == 'gruen')
+        if g >= 2:
+            continue
+        gelb = sum(1 for p in aktive if stufe(tid, p['id']) == 'gelb')
+        tage = [_tage_her(e.get('ts')) for e in hist if str(e.get('tid')) == tid]
+        tage = [x for x in tage if x is not None]
+        letzte = min(tage) if tage else None  # kleinste Tageszahl = jüngste Bewegung
+        risiko.append((a, g, gelb, letzte))
+    risiko.sort(key=lambda r: (r[1], -(r[3] if r[3] is not None else 9999)))
+    if risiko:
+        rrows = ''
+        for a, g, gelb, letzte in risiko:
+            stat = ('<span class="chip2" style="background:#fde8e8;color:#a10e0e">kritisch</span>'
+                    if g == 0 else '<span class="chip2" style="background:#fdf3d6;color:#8a5a00">Risiko</span>')
+            if letzte is None:
+                beweg = 'noch keine Bewegung'
+            elif letzte >= 14:
+                beweg = f'seit {letzte} Tg. ohne Bewegung'
+            else:
+                beweg = f'zuletzt vor {letzte} Tg.'
+            rrows += (
+                '<div class="arow" style="gap:10px">'
+                f'<span style="flex:1;min-width:200px"><span style="color:var(--muted);font-size:11px">'
+                f'{_esc(a.get("bereich") or "")}</span> {_esc(a.get("name") or "")}</span>'
+                f'<span style="min-width:160px">{g}&times; grün · {gelb}&times; gelb (lernt)</span>'
+                f'<span style="min-width:150px;color:var(--muted);font-size:12px">{beweg}</span>{stat}</div>')
+        risiko_card = f'<div class="card">{rrows}</div>'
+    else:
+        risiko_card = ('<div class="card"><p class="hint" style="margin:0">Alle Aufgaben sind von '
+                       '&ge; 2 Personen abgedeckt – kein Vertretungsrisiko.</p></div>')
+
+    # ── Offene Maßnahmen (nach Termin) ──
+    heute = datetime.now().strftime('%Y-%m-%d')
+    offene = []
+    for ck, mv in massn.items():
+        if mv.get('status') == 'erledigt' or not (mv.get('termin') or mv.get('pate')):
+            continue
+        tidk, _sep, pidk = ck.partition('|')
+        offene.append((tidk, pidk, mv))
+    offene.sort(key=lambda x: x[2].get('termin') or '9999-99-99')
+    if offene:
+        mrows = ''
+        for tidk, pidk, mv in offene:
+            nm, ber = tinfo.get(str(tidk), ('gelöschte Aufgabe', ''))
+            wer = pname.get(str(pidk), '?')
+            pate = pname.get(str(mv.get('pate')), '') if mv.get('pate') else ''
+            termin = mv.get('termin') or ''
+            if termin and termin < heute:
+                tchip = f'<span class="chip2" style="background:#fdecec;color:#b42318">überfällig {_esc(termin)}</span>'
+            elif termin:
+                tchip = f'<span class="chip2" style="background:#eef1f4;color:#374151">Termin {_esc(termin)}</span>'
+            else:
+                tchip = ''
+            patetxt = f' · Pate: {_esc(pate)}' if pate else ''
+            mrows += (
+                '<div class="arow" style="gap:10px">'
+                f'<a href="/zelle/{_esc(tidk)}/{_esc(pidk)}" style="flex:1;min-width:200px;text-decoration:none">'
+                f'<span style="color:var(--muted);font-size:11px">{_esc(ber)}</span> {_esc(nm)}</a>'
+                f'<span style="min-width:180px"><b>{_esc(wer)}</b>{patetxt}</span>{tchip}</div>')
+        offene_card = f'<div class="card">{mrows}</div>'
+    else:
+        offene_card = ('<div class="card"><p class="hint" style="margin:0">Keine offenen Maßnahmen. '
+                       'In der Übersicht einen Ampelpunkt anklicken, um eine Schulung zu planen.</p></div>')
 
     # ── Lernbedarf je Person: Abdeckung + offene Punkte (rot/gelb) ──
     if aktive and aufgaben:
@@ -614,6 +761,18 @@ def _verlauf_html(f=''):
 
     return (_platte('Teamleitung: Lernbedarf und was sich verändert hat')
             + _subtabs('verlauf', True)
+            + '<div class="sect"><h2>Wochen-Report</h2><div class="rule"></div></div>'
+            + '<p class="hint" style="margin:0 0 8px">Bewegung der letzten 7 Tage und aktuelle Abdeckung '
+            'auf einen Blick.</p>'
+            + wochen_card
+            + '<div class="sect"><h2>Vertretungs-Warnung</h2><div class="rule"></div></div>'
+            + '<p class="hint" style="margin:0 0 8px">Aufgaben, die <b>weniger als 2 Personen</b> „grün" '
+            'können – das echte Urlaubs-/Krankheitsrisiko. Kritisch zuerst, dann längste ohne Bewegung.</p>'
+            + risiko_card
+            + '<div class="sect"><h2>Offene Maßnahmen</h2><div class="rule"></div></div>'
+            + '<p class="hint" style="margin:0 0 8px">Geplante Schulungen mit Termin und Pate. '
+            'Anklicken öffnet die Zelle. Überfällige sind rot markiert.</p>'
+            + offene_card
             + '<div class="sect"><h2>Lernbedarf je Person</h2><div class="rule"></div></div>'
             + '<p class="hint" style="margin:0 0 8px">Abdeckung = Anteil der Aufgaben auf „grün". '
             'Aufklappen zeigt die offenen Punkte (rot/gelb) je Person – die Schulungsliste.</p>'
@@ -622,6 +781,78 @@ def _verlauf_html(f=''):
             + '<p class="hint" style="margin:0 0 8px">Jede Bewertungsänderung mit Zeitstempel. '
             '„Gelernt ▲" = jemand kann jetzt mehr (rot→gelb→grün), „Rückschritt ▼" = umgekehrt.</p>'
             + verlauf)
+
+
+# ── Zelle: Notizen & Maßnahme (Aufgabe × Person, nur Admin) ──────────────────
+def _zelle_html(tid, pid):
+    a = next((x for x in _aufgaben() if str(x['id']) == str(tid)), None)
+    p = next((x for x in _personen() if str(x['id']) == str(pid)), None)
+    if not a or not p:
+        return None
+    s = (_bewertungen().get(str(tid)) or {}).get(str(pid), '')
+    stlabel = AMPEL[s][2] if s in AMPEL else 'keine Angabe'
+    ck = _ckey(tid, pid)
+    notizen = _notizen().get(ck, [])
+    m = _massnahmen().get(ck, {})
+    aktive = _personen(nur_aktiv=True)
+    tp = _esc(tid) + '/' + _esc(pid)
+
+    kopf = (f'<div class="card"><div style="font-weight:700;color:var(--ink)">{_esc(a.get("bereich") or "")}</div>'
+            f'<h2 style="margin:2px 0 6px">{_esc(a["name"])}</h2>'
+            f'<p style="margin:0">Person: <b>{_esc(p["name"])}</b> &nbsp;·&nbsp; '
+            f'Aktuell: {_dot(s)} {stlabel}</p></div>')
+
+    pate_opts = '<option value="">— kein Pate —</option>' + ''.join(
+        f'<option value="{px["id"]}"{" selected" if str(m.get("pate")) == str(px["id"]) else ""}>'
+        f'{_esc(px["name"])}</option>' for px in aktive)
+    status = m.get('status') or 'offen'
+    inp = 'padding:8px 10px;border:1px solid #d5dde5;border-radius:7px;font:inherit'
+    massn_card = (
+        '<div class="sect"><h2>Maßnahme / Schulung</h2><div class="rule"></div></div>'
+        f'<div class="card"><form method="post" action="/zelle/{tp}/massnahme" '
+        'class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end">'
+        f'<label class="fld" style="margin:0"><span>Termin</span><input type="date" name="termin" '
+        f'value="{_esc(m.get("termin") or "")}" style="{inp}"></label>'
+        f'<label class="fld" style="margin:0"><span>Pate (schult)</span><select name="pate" style="{inp}">'
+        f'{pate_opts}</select></label>'
+        f'<label class="fld" style="margin:0"><span>Status</span><select name="status" style="{inp}">'
+        f'<option value="offen"{" selected" if status == "offen" else ""}>offen</option>'
+        f'<option value="erledigt"{" selected" if status == "erledigt" else ""}>erledigt</option>'
+        '</select></label>'
+        '<button class="btn" type="submit">Speichern</button>'
+        '<button class="btn secondary" type="submit" name="loeschen" value="1">entfernen</button>'
+        '</form></div>')
+
+    if notizen:
+        nlist = ''.join(
+            '<div class="arow" style="gap:10px">'
+            f'<span style="color:var(--muted);font-size:12px;min-width:104px">{_esc(x.get("ts", ""))}</span>'
+            f'<span style="flex:1">{_esc(x.get("text", ""))}</span></div>' for x in reversed(notizen))
+    else:
+        nlist = '<p class="hint" style="margin:0">Noch keine Notiz.</p>'
+    notiz_card = (
+        '<div class="sect"><h2>Notizen</h2><div class="rule"></div></div>'
+        f'<div class="card"><form method="post" action="/zelle/{tp}/notiz" class="row" style="gap:8px">'
+        '<input name="text" placeholder="z. B. am 15.8. mit Tina geübt" required '
+        f'style="flex:1;min-width:220px;{inp}"><button class="btn" type="submit">+ Notiz</button></form>'
+        f'<div style="margin-top:10px">{nlist}</div></div>')
+
+    zh = [e for e in _historie() if str(e.get('tid')) == str(tid) and str(e.get('pid')) == str(pid)]
+    if zh:
+        hrows = ''.join(
+            '<div class="arow" style="gap:10px">'
+            f'<span style="color:var(--muted);font-size:12px;min-width:104px">{_esc(e.get("ts", ""))}</span>'
+            f'<span>{_dot(e.get("alt", ""))} &rarr; {_dot(e.get("neu", ""))}</span></div>'
+            for e in reversed(zh))
+    else:
+        hrows = '<p class="hint" style="margin:0">Noch keine Änderungen.</p>'
+    hist_card = ('<div class="sect"><h2>Verlauf dieser Zelle</h2><div class="rule"></div></div>'
+                 f'<div class="card">{hrows}</div>')
+
+    return (_platte('Aufgabe × Person: Notizen & Maßnahme')
+            + '<p style="margin:0 0 8px"><a href="/verlauf">&larr; Teamleitung</a> &nbsp;·&nbsp; '
+            '<a href="/">Übersicht</a></p>'
+            + kopf + massn_card + notiz_card + hist_card)
 
 
 # ── Routen ───────────────────────────────────────────────────────────────────
@@ -720,6 +951,50 @@ def verlauf(request: Request, f: str = ''):
     if not _is_admin(request.state.user):
         return RedirectResponse('/', status_code=303)
     return HTMLResponse(_seite(_verlauf_html(f), request.state.user))
+
+
+@app.get('/zelle/{tid}/{pid}', response_class=HTMLResponse)
+def zelle_ansicht(request: Request, tid: str, pid: str):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/', status_code=303)
+    html = _zelle_html(tid, pid)
+    if html is None:
+        return RedirectResponse('/', status_code=303)
+    return HTMLResponse(_seite(html, request.state.user))
+
+
+@app.post('/zelle/{tid}/{pid}/notiz')
+async def zelle_notiz(request: Request, tid: str, pid: str):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/', status_code=303)
+    form = await request.form()
+    text = (form.get('text') or '').strip()
+    if text:
+        d = _notizen()
+        ck = _ckey(tid, pid)
+        lst = d.get(ck) or []
+        lst.append({'ts': datetime.now().strftime('%Y-%m-%d %H:%M'), 'text': text[:500]})
+        d[ck] = lst
+        _sichere(NOTIZEN_PATH, d)
+    return RedirectResponse(f'/zelle/{tid}/{pid}', status_code=303)
+
+
+@app.post('/zelle/{tid}/{pid}/massnahme')
+async def zelle_massnahme(request: Request, tid: str, pid: str):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/', status_code=303)
+    form = await request.form()
+    d = _massnahmen()
+    ck = _ckey(tid, pid)
+    if form.get('loeschen') == '1':
+        d.pop(ck, None)
+    else:
+        d[ck] = {'termin': (form.get('termin') or '').strip(),
+                 'pate': (form.get('pate') or '').strip(),
+                 'status': form.get('status') if form.get('status') in ('offen', 'erledigt') else 'offen',
+                 'erstellt': datetime.now().strftime('%Y-%m-%d %H:%M')}
+    _sichere(MASSNAHMEN_PATH, d)
+    return RedirectResponse(f'/zelle/{tid}/{pid}', status_code=303)
 
 
 @app.post('/aufgabe')
