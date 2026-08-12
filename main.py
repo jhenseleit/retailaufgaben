@@ -69,9 +69,16 @@ def _aufgaben():
     return liste if isinstance(liste, list) else []
 
 
-def _personen():
+def _personen(nur_aktiv=False):
     liste = _lade(PERSONEN_PATH, [])
-    return liste if isinstance(liste, list) else []
+    liste = liste if isinstance(liste, list) else []
+    if nur_aktiv:
+        return [p for p in liste if p.get('aktiv', True)]
+    return liste  # Datei-Reihenfolge = Anzeige-Reihenfolge (per Hoch/Runter änderbar)
+
+
+def _is_admin(user):
+    return bool(user) and (user.get('role') == 'admin')
 
 
 def _bewertungen():
@@ -208,7 +215,7 @@ def _legende():
 # ── Übersicht / Matrix ───────────────────────────────────────────────────────
 def _matrix_html():
     aufgaben = _aufgaben()
-    personen = _personen()
+    personen = _personen(nur_aktiv=True)
     bew = _bewertungen()
 
     if not aufgaben:
@@ -285,7 +292,7 @@ def _matrix_html():
 # ── Meine Bewertung ──────────────────────────────────────────────────────────
 def _bewerten_html(pid=''):
     aufgaben = _aufgaben()
-    personen = _personen()
+    personen = _personen(nur_aktiv=True)
     bew = _bewertungen()
     pid = str(pid or '')
 
@@ -342,7 +349,7 @@ def _bewerten_html(pid=''):
 
 
 # ── Verwalten (Aufgaben, Team, Import/Export) ────────────────────────────────
-def _verwalten_html(meldung=''):
+def _verwalten_html(meldung='', is_admin=False):
     aufgaben = _aufgaben()
     personen = _personen()
 
@@ -356,52 +363,105 @@ def _verwalten_html(meldung=''):
             'onsubmit="return confirm(\'Aufgabe löschen? Auch alle Bewertungen dazu.\')">'
             '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
 
+    n = len(personen)
     p_zeilen = ''
-    for p in personen:
+    for i, p in enumerate(personen):
+        aktiv = p.get('aktiv', True)
+        chip = ('' if aktiv else
+                ' <span class="chip2" style="background:#eef1f4;color:#6b7280">inaktiv</span>')
+        name_html = (f'<span style="{"" if aktiv else "opacity:.55"}">{_esc(p["name"])}</span>{chip}')
+        if is_admin:
+            pid = _esc(p['id'])
+            up_dis = ' disabled' if i == 0 else ''
+            dn_dis = ' disabled' if i == n - 1 else ''
+            ctrl = (
+                '<div class="row" style="gap:5px;margin:0">'
+                f'<form method="post" action="/person/{pid}/hoch" style="display:inline;margin:0">'
+                f'<button class="btn secondary btn-sm" type="submit" title="nach oben"{up_dis}>&uarr;</button></form>'
+                f'<form method="post" action="/person/{pid}/runter" style="display:inline;margin:0">'
+                f'<button class="btn secondary btn-sm" type="submit" title="nach unten"{dn_dis}>&darr;</button></form>'
+                f'<form method="post" action="/person/{pid}/aktiv" style="display:inline;margin:0">'
+                f'<button class="btn secondary btn-sm" type="submit">{"deaktivieren" if aktiv else "aktivieren"}'
+                '</button></form>'
+                f'<form method="post" action="/person/{pid}/loeschen" style="display:inline;margin:0" '
+                'onsubmit="return confirm(\'Person löschen? Auch alle Bewertungen dieser Person.\')">'
+                '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
+        else:
+            ctrl = ''
         p_zeilen += (
-            f'<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--line);'
-            f'padding:7px 0;margin:0"><span>{_esc(p["name"])}</span>'
-            f'<form method="post" action="/person/{_esc(p["id"])}/loeschen" '
-            'onsubmit="return confirm(\'Person löschen? Auch alle Bewertungen dieser Person.\')">'
-            '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
+            '<div class="row" style="justify-content:space-between;align-items:center;gap:10px;'
+            f'border-bottom:1px solid var(--line);padding:7px 0;margin:0"><span>{name_html}</span>{ctrl}</div>')
 
     a_block = a_zeilen or '<p class="hint">Noch keine Aufgaben.</p>'
     p_block = p_zeilen or '<p class="hint">Noch keine Personen.</p>'
+
+    # Bestehende Hauptaufgaben (= Bereiche) als Vorschlagsliste zum Zuordnen
+    haupt, gesehen = [], set()
+    for a in aufgaben:
+        b = (a.get('bereich') or '').strip()
+        if b and b.lower() not in gesehen:
+            gesehen.add(b.lower())
+            haupt.append(b)
+    haupt_opts = ''.join(f'<option value="{_esc(b)}">' for b in haupt)
+
+    if is_admin:
+        team_form = (
+            '<form method="post" action="/person" class="row" style="gap:8px;flex-wrap:wrap">'
+            '<input name="name" placeholder="Name" required '
+            'style="flex:1;min-width:200px;padding:9px 11px;border:1px solid #d5dde5;border-radius:7px;font:inherit">'
+            '<button class="btn" type="submit">+ Person</button></form>')
+        team_hint = ('<p class="hint" style="margin:8px 0 0">Mit &uarr;&darr; sortieren, &bdquo;deaktivieren&ldquo; '
+                     'nimmt jemanden aus Matrix &amp; Bewertung (Daten bleiben erhalten).</p>')
+        import_card = (
+            '<div class="sect"><h2>Excel</h2><div class="rule"></div></div>'
+            '<div class="card"><p class="hint" style="margin-top:0">Import: Excel/CSV mit einer Spalte '
+            '<b>Teilaufgabe</b> (erkannt werden auch &bdquo;Name&ldquo;, &bdquo;Aufgabe&ldquo;, '
+            '&bdquo;Tätigkeit&ldquo;, &bdquo;Task&ldquo;); optionale Spalte <b>Hauptaufgabe</b> '
+            '(&bdquo;Section&ldquo;, &bdquo;Column&ldquo;, &bdquo;Bereich&ldquo;, &bdquo;Kategorie&ldquo;) und '
+            'optionale Spalte <b>Assignee</b> (&bdquo;Bearbeiter&ldquo;, &bdquo;Verantwortlich&ldquo;). '
+            'Genannte Assignees werden automatisch als Person angelegt und ihre Aufgaben direkt auf '
+            '<b>grün</b> gesetzt (jederzeit änderbar). Vorhandene Aufgaben bleiben erhalten, Doppelte '
+            'werden übersprungen.</p>'
+            '<form method="post" action="/import" enctype="multipart/form-data" class="row" style="gap:8px">'
+            '<input type="file" name="datei" accept=".xlsx,.xlsm,.csv" required>'
+            '<button class="btn" type="submit">Aufgaben importieren</button></form>'
+            '<div class="row" style="margin-top:10px"><a class="btn secondary" href="/export.xlsx">'
+            'Matrix als Excel exportieren</a></div></div>')
+    else:
+        team_form = ''
+        team_hint = '<p class="hint" style="margin:8px 0 0">Das Team wird von der Teamleitung gepflegt.</p>'
+        import_card = (
+            '<div class="sect"><h2>Excel</h2><div class="rule"></div></div>'
+            '<div class="card"><div class="row" style="margin:0"><a class="btn secondary" '
+            'href="/export.xlsx">Matrix als Excel exportieren</a></div></div>')
+
     return (
         _platte('Aufgaben und Team pflegen')
         + _subtabs('verwalten')
         + meldung
         + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px">'
-        # Aufgaben
+        # Aufgaben (Hauptaufgabe bündelt Teilaufgaben)
         '<div class="card"><h2 style="margin-top:0">Aufgaben</h2>'
         '<form method="post" action="/aufgabe" class="row" style="gap:8px;flex-wrap:wrap">'
-        '<input name="name" placeholder="Aufgabe (z. B. Retoure buchen)" required '
+        '<input name="name" placeholder="Teilaufgabe (z. B. Wayfair)" required '
         'style="flex:1;min-width:200px;padding:9px 11px;border:1px solid #d5dde5;border-radius:7px;font:inherit">'
-        '<input name="bereich" placeholder="Bereich (optional)" '
-        'style="width:180px;padding:9px 11px;border:1px solid #d5dde5;border-radius:7px;font:inherit">'
+        '<input name="bereich" list="haupt" placeholder="Hauptaufgabe (z. B. Portale täglich)" '
+        'style="width:210px;padding:9px 11px;border:1px solid #d5dde5;border-radius:7px;font:inherit">'
+        f'<datalist id="haupt">{haupt_opts}</datalist>'
         '<button class="btn" type="submit">+ Aufgabe</button></form>'
+        '<p class="hint" style="margin:8px 0 0">Gleiche <b>Hauptaufgabe</b> eintippen (oder aus der Liste '
+        'wählen), um mehrere <b>Teilaufgaben</b> darunter zu bündeln – z.&nbsp;B. „Portale täglich" mit '
+        'Pharao, Wayfair, Viking … Das Wie steht in Asana, hier zählt nur die Ampel-Einschätzung.</p>'
         f'<div style="margin-top:10px">{a_block}</div></div>'
         # Team
         '<div class="card"><h2 style="margin-top:0">Team</h2>'
-        '<form method="post" action="/person" class="row" style="gap:8px;flex-wrap:wrap">'
-        '<input name="name" placeholder="Name" required '
-        'style="flex:1;min-width:200px;padding:9px 11px;border:1px solid #d5dde5;border-radius:7px;font:inherit">'
-        '<button class="btn" type="submit">+ Person</button></form>'
-        f'<div style="margin-top:10px">{p_block}</div></div>'
+        + team_form
+        + f'<div style="margin-top:10px">{p_block}</div>'
+        + team_hint
+        + '</div>'
         '</div>'
         # Import / Export
-        + '<div class="sect"><h2>Excel</h2><div class="rule"></div></div>'
-        '<div class="card"><p class="hint" style="margin-top:0">Import: Excel/CSV mit einer Spalte '
-        '<b>Aufgabe</b> (erkannt werden auch „Name", „Tätigkeit", „Task", „Bezeichnung"); optionale '
-        'Spalte <b>Bereich</b> („Section", „Column", „Kategorie", „Gruppe") und optionale Spalte '
-        '<b>Assignee</b> („Bearbeiter", „Verantwortlich"). Genannte Assignees werden automatisch als '
-        'Person angelegt und ihre Aufgaben direkt auf <b>grün</b> gesetzt (jederzeit änderbar). '
-        'Vorhandene Aufgaben bleiben erhalten, Doppelte werden übersprungen.</p>'
-        '<form method="post" action="/import" enctype="multipart/form-data" class="row" style="gap:8px">'
-        '<input type="file" name="datei" accept=".xlsx,.xlsm,.csv" required>'
-        '<button class="btn" type="submit">Aufgaben importieren</button></form>'
-        '<div class="row" style="margin-top:10px"><a class="btn secondary" href="/export.xlsx">'
-        'Matrix als Excel exportieren</a></div></div>')
+        + import_card)
 
 
 # ── Routen ───────────────────────────────────────────────────────────────────
@@ -454,7 +514,8 @@ def verwalten(request: Request, neu: str = '', pers: str = '', gruen: str = '', 
             teile.append(f'<b>{_esc(gruen)}</b>&times; „grün" aus Assignee gesetzt')
         meldung = ('<div class="card" style="border-left:4px solid #16a34a;margin-bottom:14px">'
                    f'<p style="margin:0">Import übernommen: {", ".join(teile) or "nichts Neues"}.</p></div>')
-    return HTMLResponse(_seite(_verwalten_html(meldung), request.state.user))
+    return HTMLResponse(_seite(_verwalten_html(meldung, _is_admin(request.state.user)),
+                               request.state.user))
 
 
 @app.post('/aufgabe')
@@ -481,17 +542,56 @@ def aufgabe_del(request: Request, aid: str):
 
 @app.post('/person')
 async def person_add(request: Request):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/verwalten', status_code=303)
     form = await request.form()
     name = (form.get('name') or '').strip()
     if name:
         liste = _personen()
-        liste.append({'id': secrets.token_hex(5), 'name': name})
+        liste.append({'id': secrets.token_hex(5), 'name': name, 'aktiv': True})
         _sichere(PERSONEN_PATH, liste)
     return RedirectResponse('/verwalten', status_code=303)
 
 
+@app.post('/person/{pid}/aktiv')
+def person_aktiv(request: Request, pid: str):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/verwalten', status_code=303)
+    liste = _personen()
+    for p in liste:
+        if str(p.get('id')) == str(pid):
+            p['aktiv'] = not p.get('aktiv', True)
+    _sichere(PERSONEN_PATH, liste)
+    return RedirectResponse('/verwalten', status_code=303)
+
+
+def _person_move(request: Request, pid: str, richtung: str):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/verwalten', status_code=303)
+    liste = _personen()
+    idx = next((i for i, p in enumerate(liste) if str(p.get('id')) == str(pid)), None)
+    if idx is not None:
+        ziel = idx - 1 if richtung == 'hoch' else idx + 1
+        if 0 <= ziel < len(liste):
+            liste[idx], liste[ziel] = liste[ziel], liste[idx]
+            _sichere(PERSONEN_PATH, liste)
+    return RedirectResponse('/verwalten', status_code=303)
+
+
+@app.post('/person/{pid}/hoch')
+def person_hoch(request: Request, pid: str):
+    return _person_move(request, pid, 'hoch')
+
+
+@app.post('/person/{pid}/runter')
+def person_runter(request: Request, pid: str):
+    return _person_move(request, pid, 'runter')
+
+
 @app.post('/person/{pid}/loeschen')
 def person_del(request: Request, pid: str):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/verwalten', status_code=303)
     _sichere(PERSONEN_PATH, [p for p in _personen() if str(p.get('id')) != str(pid)])
     bew = _bewertungen()
     geaendert = False
@@ -526,6 +626,8 @@ def _zellen_lesen(dateiname, roh):
 
 @app.post('/import')
 async def importieren(request: Request, datei: UploadFile = File(...)):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/verwalten', status_code=303)
     roh = await datei.read()
     try:
         zeilen = _zellen_lesen(datei.filename or '', roh)
@@ -594,7 +696,7 @@ async def importieren(request: Request, datei: UploadFile = File(...)):
             pkey = ass.lower()
             p = pers_by_name.get(pkey)
             if p is None:
-                p = {'id': secrets.token_hex(5), 'name': ass}
+                p = {'id': secrets.token_hex(5), 'name': ass, 'aktiv': True}
                 personen.append(p)
                 pers_by_name[pkey] = p
                 neu_pers += 1
@@ -614,7 +716,7 @@ async def importieren(request: Request, datei: UploadFile = File(...)):
 @app.get('/export.xlsx')
 def export_xlsx(request: Request):
     aufgaben = _aufgaben()
-    personen = _personen()
+    personen = _personen(nur_aktiv=True)
     bew = _bewertungen()
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -623,7 +725,7 @@ def export_xlsx(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = 'Ampelmatrix'
-    kopf = ['Bereich', 'Aufgabe'] + [p['name'] for p in personen] + ['grün', 'Status']
+    kopf = ['Hauptaufgabe', 'Teilaufgabe'] + [p['name'] for p in personen] + ['grün', 'Status']
     ws.append(kopf)
     for c in ws[1]:
         c.font = Font(bold=True, color='FFFFFF')
