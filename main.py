@@ -338,6 +338,18 @@ def _bewerten_html(pid=''):
             + radio('', 'n', '—')
             + '</div></div>')
 
+    schnell = (
+        '<form method="post" action="/bewerten/pauschal" '
+        'onsubmit="return confirm(\'Alle Aufgaben dieser Person auf einmal überschreiben?\')" '
+        'class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">'
+        f'<input type="hidden" name="person" value="{_esc(pid)}">'
+        '<b style="font-size:13px">Alle auf einmal:</b>'
+        '<button class="btn secondary btn-sm" name="stufe" value="gruen" type="submit">alle grün</button>'
+        '<button class="btn secondary btn-sm" name="stufe" value="gelb" type="submit">alle gelb</button>'
+        '<button class="btn secondary btn-sm" name="stufe" value="rot" type="submit">alle rot</button>'
+        '<button class="btn secondary btn-sm" name="stufe" value="" type="submit">zurücksetzen</button>'
+        '<span class="hint" style="margin:0">Setzt jede Teilaufgabe – danach unten einzeln feinjustieren.</span>'
+        '</form>')
     form = (
         '<form method="post" action="/bewerten">'
         f'<input type="hidden" name="person" value="{_esc(pid)}">'
@@ -345,7 +357,7 @@ def _bewerten_html(pid=''):
         '<div class="row" style="margin-top:14px"><button class="btn" type="submit">Speichern</button> '
         '<span class="hint" style="align-self:center">Deine Angaben, jederzeit änderbar.</span></div>'
         '</div></form>')
-    return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten') + auswahl + form)
+    return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten') + auswahl + schnell + form)
 
 
 # ── Verwalten (Aufgaben, Team, Import/Export) ────────────────────────────────
@@ -488,6 +500,29 @@ async def bewerten_speichern(request: Request):
         eintrag = bew.get(tkey) or {}
         if val in AMPEL:
             eintrag[pid] = val
+        else:
+            eintrag.pop(pid, None)
+        if eintrag:
+            bew[tkey] = eintrag
+        elif tkey in bew:
+            del bew[tkey]
+    _sichere(BEWERTUNG_PATH, bew)
+    return RedirectResponse(f'/bewerten?person={pid}&ok=1', status_code=303)
+
+
+@app.post('/bewerten/pauschal')
+async def bewerten_pauschal(request: Request):
+    form = await request.form()
+    pid = str(form.get('person') or '')
+    if not pid:
+        return RedirectResponse('/bewerten', status_code=303)
+    stufe = form.get('stufe') or ''
+    bew = _bewertungen()
+    for a in _aufgaben():
+        tkey = str(a['id'])
+        eintrag = bew.get(tkey) or {}
+        if stufe in AMPEL:
+            eintrag[pid] = stufe
         else:
             eintrag.pop(pid, None)
         if eintrag:
