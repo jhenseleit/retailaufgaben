@@ -35,6 +35,7 @@ DATA_DIR = Path(os.environ.get('RA_DATA_DIR', '/data'))
 AUFGABEN_PATH = DATA_DIR / 'aufgaben.json'
 PERSONEN_PATH = DATA_DIR / 'personen.json'
 BEWERTUNG_PATH = DATA_DIR / 'bewertung.json'
+HISTORIE_PATH = DATA_DIR / 'historie.json'
 AUDIT_DB = DATA_DIR / 'audit.db'
 
 # Ampelstufen: Schlüssel -> (Farbe, kurz, lang)
@@ -44,6 +45,8 @@ AMPEL = {
     'rot': ('#dc2626', 'Rot', 'kann ich nicht'),
 }
 STUFEN = ('gruen', 'gelb', 'rot')
+# Rang für „gelernt/Rückschritt": höher = mehr Kompetenz
+RANG = {'': 0, 'rot': 1, 'gelb': 2, 'gruen': 3}
 
 app = FastAPI(title=APP_NAME, docs_url=None, redoc_url=None)
 
@@ -84,6 +87,23 @@ def _is_admin(user):
 def _bewertungen():
     d = _lade(BEWERTUNG_PATH, {})
     return d if isinstance(d, dict) else {}
+
+
+def _historie():
+    h = _lade(HISTORIE_PATH, [])
+    return h if isinstance(h, list) else []
+
+
+def _historie_add(events):
+    """events: Liste von {ts, pid, tid, alt, neu}. Nur echte Änderungen."""
+    events = [e for e in events if e.get('alt') != e.get('neu')]
+    if not events:
+        return
+    h = _historie()
+    h.extend(events)
+    if len(h) > 3000:
+        h = h[-3000:]
+    _sichere(HISTORIE_PATH, h)
 
 
 def _esc(s):
@@ -193,15 +213,16 @@ def _platte(sub=''):
             f'</div><div class="typ"><span>Typ</span><strong>{TYP}</strong></div></div>')
 
 
-def _subtabs(active):
+def _subtabs(active, is_admin=False):
     def a(key, label, href):
         cls = ' class="on"' if active == key else ''
         return f'<a href="{href}"{cls}>{label}</a>'
-    return ('<div class="subtabs">'
-            + a('matrix', 'Übersicht', '/')
+    tabs = (a('matrix', 'Übersicht', '/')
             + a('bewerten', 'Meine Bewertung', '/bewerten')
-            + a('verwalten', 'Aufgaben & Team', '/verwalten')
-            + '</div>')
+            + a('verwalten', 'Aufgaben & Team', '/verwalten'))
+    if is_admin:
+        tabs += a('verlauf', 'Verlauf & Lernbedarf', '/verlauf')
+    return '<div class="subtabs">' + tabs + '</div>'
 
 
 def _dot(stufe):
@@ -216,14 +237,14 @@ def _legende():
 
 
 # ── Übersicht / Matrix ───────────────────────────────────────────────────────
-def _matrix_html():
+def _matrix_html(is_admin=False):
     aufgaben = _aufgaben()
     personen = _personen(nur_aktiv=True)
     bew = _bewertungen()
 
     if not aufgaben:
         return (_platte('Ampelmatrix: wer kann welche Aufgabe – für Urlaubs- und Krankheitsvertretung')
-                + _subtabs('matrix')
+                + _subtabs('matrix', is_admin)
                 + '<div class="card"><p class="hint" style="margin:0">Noch keine Aufgaben. '
                 'Lege sie unter <a href="/verwalten">Aufgaben &amp; Team</a> an oder importiere deine '
                 'Excel-Tabelle.</p></div>')
@@ -289,11 +310,11 @@ def _matrix_html():
                    '<a class="btn secondary" href="/export.xlsx">Als Excel exportieren</a></div></div>')
 
     return (_platte('Ampelmatrix: wer kann welche Aufgabe – für Urlaubs- und Krankheitsvertretung')
-            + _subtabs('matrix') + _legende() + warn + koerper)
+            + _subtabs('matrix', is_admin) + _legende() + warn + koerper)
 
 
 # ── Meine Bewertung ──────────────────────────────────────────────────────────
-def _bewerten_html(pid=''):
+def _bewerten_html(pid='', is_admin=False):
     aufgaben = _aufgaben()
     personen = _personen(nur_aktiv=True)
     bew = _bewertungen()
@@ -311,13 +332,13 @@ def _bewerten_html(pid=''):
         'Ampel. Grün = kann ich, Gelb = brauche Hilfe, Rot = kann ich nicht / noch nie gemacht.</p></div>')
 
     if not personen:
-        return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten')
+        return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten', is_admin)
                 + '<div class="card"><p class="hint" style="margin:0">Noch keine Teammitglieder – '
                 'zuerst unter <a href="/verwalten">Aufgaben &amp; Team</a> anlegen.</p></div>')
     if not pid or not any(str(p['id']) == pid for p in personen):
-        return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten') + auswahl)
+        return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten', is_admin) + auswahl)
     if not aufgaben:
-        return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten') + auswahl
+        return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten', is_admin) + auswahl
                 + '<div class="card"><p class="hint" style="margin:0">Noch keine Aufgaben angelegt.</p></div>')
 
     # nach Hauptaufgabe gruppieren (Reihenfolge des ersten Vorkommens)
@@ -369,7 +390,7 @@ def _bewerten_html(pid=''):
         '<div class="row" style="margin-top:14px"><button class="btn" type="submit">Speichern</button> '
         '<span class="hint" style="align-self:center">Deine Angaben, jederzeit änderbar.</span></div>'
         '</div></form>')
-    return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten') + auswahl + schnell + form)
+    return (_platte('Meine Selbsteinschätzung') + _subtabs('bewerten', is_admin) + auswahl + schnell + form)
 
 
 # ── Verwalten (Aufgaben, Team, Import/Export) ────────────────────────────────
@@ -479,7 +500,7 @@ def _verwalten_html(meldung='', is_admin=False):
 
     return (
         _platte('Aufgaben und Team pflegen')
-        + _subtabs('verwalten')
+        + _subtabs('verwalten', is_admin)
         + meldung
         + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px">'
         # Aufgaben (Hauptaufgabe bündelt Teilaufgaben)
@@ -506,15 +527,113 @@ def _verwalten_html(meldung='', is_admin=False):
         + import_card)
 
 
+# ── Verlauf & Lernbedarf (nur Teamleitung/Admin) ─────────────────────────────
+def _verlauf_html(f=''):
+    aufgaben = _aufgaben()
+    personen = _personen()
+    aktive = [p for p in personen if p.get('aktiv', True)]
+    bew = _bewertungen()
+    hist = _historie()
+    pname = {str(p['id']): p.get('name', '?') for p in personen}
+    tinfo = {str(a['id']): (a.get('name') or '', a.get('bereich') or '') for a in aufgaben}
+    n = len(aufgaben)
+
+    # ── Lernbedarf je Person: Abdeckung + offene Punkte (rot/gelb) ──
+    if aktive and aufgaben:
+        kopf = ('<tr><th style="text-align:left">Person</th><th>grün</th><th>gelb</th>'
+                '<th>rot</th><th>k.&nbsp;A.</th><th>abgedeckt</th></tr>')
+        zeilen, details = '', ''
+        for p in aktive:
+            pid = str(p['id'])
+            c = {'gruen': 0, 'gelb': 0, 'rot': 0, '': 0}
+            offen = []
+            for a in aufgaben:
+                s = (bew.get(str(a['id'])) or {}).get(pid, '')
+                c[s if s in AMPEL else ''] += 1
+                if s in ('rot', 'gelb'):
+                    offen.append((a.get('bereich') or '', a.get('name') or '', s))
+            pct = round(c['gruen'] * 100 / n) if n else 0
+            farbe = '#16a34a' if pct >= 80 else ('#eab308' if pct >= 50 else '#dc2626')
+            zeilen += (f'<tr><td style="text-align:left"><b>{_esc(p["name"])}</b></td>'
+                       f'<td>{c["gruen"]}</td><td>{c["gelb"]}</td><td>{c["rot"]}</td>'
+                       f'<td>{c[""]}</td>'
+                       f'<td style="color:{farbe};font-weight:700">{pct}%</td></tr>')
+            if offen:
+                items = ''.join(
+                    '<div class="arow tp" style="padding:5px 0">'
+                    f'<div class="an">{_dot(s)}&nbsp; '
+                    f'<span style="color:var(--muted);font-size:11px">{_esc(b)}</span> {_esc(nm)}</div></div>'
+                    for b, nm, s in offen)
+                details += (
+                    '<details style="margin:6px 0;border-top:1px solid var(--line);padding-top:6px">'
+                    f'<summary style="cursor:pointer;font-weight:600">{_esc(p["name"])} &ndash; '
+                    f'{len(offen)} offene Punkte (rot/gelb)</summary>'
+                    f'<div style="padding:4px 0 8px">{items}</div></details>')
+        lern = (f'<div class="card"><div class="tscroll"><table class="mtx" style="max-width:680px">'
+                f'<thead>{kopf}</thead><tbody>{zeilen}</tbody></table></div>{details}</div>')
+    else:
+        lern = ('<div class="card"><p class="hint" style="margin:0">Noch keine Bewertungen – '
+                'sobald das Team bewertet, erscheint hier der Lernbedarf.</p></div>')
+
+    # ── Änderungsverlauf (Timeline, neueste zuerst) ──
+    filter_btns = ''.join(
+        f'<a class="btn secondary btn-sm" href="/verlauf?f={k}" '
+        f'style="{"background:var(--accent);color:#fff;border-color:transparent" if f == k else ""}">{lbl}</a>'
+        for k, lbl in (('', 'Alle'), ('gelernt', 'Gelernt ▲'), ('rueck', 'Rückschritte ▼')))
+    rows = ''
+    gezeigt = 0
+    for e in reversed(hist):
+        alt, neu = e.get('alt', ''), e.get('neu', '')
+        ra, rn = RANG.get(alt, 0), RANG.get(neu, 0)
+        art = 'gelernt' if rn > ra else ('rueck' if rn < ra else 'geaendert')
+        if f == 'gelernt' and art != 'gelernt':
+            continue
+        if f == 'rueck' and art != 'rueck':
+            continue
+        if gezeigt >= 300:
+            break
+        gezeigt += 1
+        nm, ber = tinfo.get(str(e.get('tid')), ('gelöschte Aufgabe', ''))
+        if art == 'gelernt':
+            chip = '<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">gelernt ▲</span>'
+        elif art == 'rueck':
+            chip = '<span class="chip2" style="background:#fdecec;color:#b42318">Rückschritt ▼</span>'
+        else:
+            chip = '<span class="chip2" style="background:#eef1f4;color:#6b7280">geändert</span>'
+        rows += (
+            '<div class="arow" style="gap:10px">'
+            f'<span style="color:var(--muted);font-size:12px;min-width:104px">{_esc(e.get("ts", ""))}</span>'
+            f'<span style="min-width:130px"><b>{_esc(pname.get(str(e.get("pid")), "?"))}</b></span>'
+            f'<span style="flex:1;min-width:180px"><span style="color:var(--muted);font-size:11px">'
+            f'{_esc(ber)}</span> {_esc(nm)}</span>'
+            f'<span style="white-space:nowrap">{_dot(alt)} &rarr; {_dot(neu)} &nbsp;{chip}</span></div>')
+    if not rows:
+        rows = '<p class="hint" style="margin:0">Noch keine Änderungen erfasst.</p>'
+    verlauf = (f'<div class="row" style="gap:6px;margin:0 0 10px">{filter_btns}</div>'
+               f'<div class="card">{rows}</div>')
+
+    return (_platte('Teamleitung: Lernbedarf und was sich verändert hat')
+            + _subtabs('verlauf', True)
+            + '<div class="sect"><h2>Lernbedarf je Person</h2><div class="rule"></div></div>'
+            + '<p class="hint" style="margin:0 0 8px">Abdeckung = Anteil der Aufgaben auf „grün". '
+            'Aufklappen zeigt die offenen Punkte (rot/gelb) je Person – die Schulungsliste.</p>'
+            + lern
+            + '<div class="sect"><h2>Änderungsverlauf</h2><div class="rule"></div></div>'
+            + '<p class="hint" style="margin:0 0 8px">Jede Bewertungsänderung mit Zeitstempel. '
+            '„Gelernt ▲" = jemand kann jetzt mehr (rot→gelb→grün), „Rückschritt ▼" = umgekehrt.</p>'
+            + verlauf)
+
+
 # ── Routen ───────────────────────────────────────────────────────────────────
 @app.get('/', response_class=HTMLResponse)
 def matrix(request: Request):
-    return HTMLResponse(_seite(_matrix_html(), request.state.user))
+    return HTMLResponse(_seite(_matrix_html(_is_admin(request.state.user)), request.state.user))
 
 
 @app.get('/bewerten', response_class=HTMLResponse)
 def bewerten(request: Request, person: str = ''):
-    return HTMLResponse(_seite(_bewerten_html(person), request.state.user))
+    return HTMLResponse(_seite(_bewerten_html(person, _is_admin(request.state.user)),
+                               request.state.user))
 
 
 @app.post('/bewerten')
@@ -524,12 +643,18 @@ async def bewerten_speichern(request: Request):
     if not pid:
         return RedirectResponse('/bewerten', status_code=303)
     bew = _bewertungen()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M')
+    events = []
     for a in _aufgaben():
         val = form.get(f't{a["id"]}')
+        neu = val if val in AMPEL else ''
         tkey = str(a['id'])
         eintrag = bew.get(tkey) or {}
-        if val in AMPEL:
-            eintrag[pid] = val
+        alt = eintrag.get(pid, '')
+        if alt != neu:
+            events.append({'ts': now, 'pid': pid, 'tid': tkey, 'alt': alt, 'neu': neu})
+        if neu:
+            eintrag[pid] = neu
         else:
             eintrag.pop(pid, None)
         if eintrag:
@@ -537,6 +662,7 @@ async def bewerten_speichern(request: Request):
         elif tkey in bew:
             del bew[tkey]
     _sichere(BEWERTUNG_PATH, bew)
+    _historie_add(events)
     return RedirectResponse(f'/bewerten?person={pid}&ok=1', status_code=303)
 
 
@@ -546,12 +672,17 @@ async def bewerten_pauschal(request: Request):
     pid = str(form.get('person') or '')
     if not pid:
         return RedirectResponse('/bewerten', status_code=303)
-    stufe = form.get('stufe') or ''
+    stufe = form.get('stufe') if form.get('stufe') in AMPEL else ''
     bew = _bewertungen()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M')
+    events = []
     for a in _aufgaben():
         tkey = str(a['id'])
         eintrag = bew.get(tkey) or {}
-        if stufe in AMPEL:
+        alt = eintrag.get(pid, '')
+        if alt != stufe:
+            events.append({'ts': now, 'pid': pid, 'tid': tkey, 'alt': alt, 'neu': stufe})
+        if stufe:
             eintrag[pid] = stufe
         else:
             eintrag.pop(pid, None)
@@ -560,6 +691,7 @@ async def bewerten_pauschal(request: Request):
         elif tkey in bew:
             del bew[tkey]
     _sichere(BEWERTUNG_PATH, bew)
+    _historie_add(events)
     return RedirectResponse(f'/bewerten?person={pid}&ok=1', status_code=303)
 
 
@@ -581,6 +713,13 @@ def verwalten(request: Request, neu: str = '', pers: str = '', gruen: str = '', 
                    f'<p style="margin:0">Import übernommen: {", ".join(teile) or "nichts Neues"}.</p></div>')
     return HTMLResponse(_seite(_verwalten_html(meldung, _is_admin(request.state.user)),
                                request.state.user))
+
+
+@app.get('/verlauf', response_class=HTMLResponse)
+def verlauf(request: Request, f: str = ''):
+    if not _is_admin(request.state.user):
+        return RedirectResponse('/', status_code=303)
+    return HTMLResponse(_seite(_verlauf_html(f), request.state.user))
 
 
 @app.post('/aufgabe')
