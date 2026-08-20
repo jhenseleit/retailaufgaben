@@ -86,17 +86,49 @@ def _ist_backup(p) -> bool:
     return bool(p.get('backup'))
 
 
-def _zaehlende(personen=None):
-    """Wer zählt für die Abdeckung? Backup-Personen nicht.
+def _heute() -> str:
+    return datetime.now().date().isoformat()
 
-    Jörn springt im Notfall ein, ist aber kein Maßstab dafür, ob eine Aufgabe
-    im Team abgedeckt ist. Zählte er mit, sähe jede Aufgabe, die nur er kann,
-    wie erledigt aus - und genau die ist das Risiko. Deshalb steht er weiter
-    in der Matrix (man sieht, dass er es kann), fließt aber nicht in
+
+def _abgelaufen(p) -> bool:
+    """Person nur befristet im Team - Stichtag vorbei?
+
+    Eine Praktikantin, die im Oktober geht, darf im November nicht mehr als
+    Abdeckung dastehen. Ohne Stichtag muesste jemand daran denken; mit
+    Stichtag faellt sie von selbst heraus.
+    """
+    bis = str(p.get('bis') or '').strip()
+    return bool(bis) and bis < _heute()
+
+
+def _zaehlt_nicht_grund(p) -> str:
+    if not p.get('aktiv', True):
+        return 'inaktiv'
+    if _abgelaufen(p):
+        return f'nur bis {_datum_de(p.get("bis"))}'
+    if _ist_backup(p):
+        return (p.get('hinweis') or '').strip() or 'Backup'
+    return ''
+
+
+def _datum_de(iso) -> str:
+    t = str(iso or '')
+    return f'{t[8:10]}.{t[5:7]}.{t[0:4]}' if len(t) >= 10 else t
+
+
+def _zaehlende(personen=None):
+    """Wer zählt für die Abdeckung?
+
+    Nicht mitgezählt werden: inaktive, befristete nach ihrem Stichtag und
+    alle, die als „zählt nicht" markiert sind. Joern springt nur ein, wenn
+    alle Stricke reissen; Mareike ist Praktikantin auf Zeit. Zaehlten sie mit,
+    saehe jede Aufgabe, die nur sie koennen, wie abgedeckt aus - und genau die
+    ist das Risiko. Sie bleiben sichtbar, fliessen aber nicht in
     „kritisch / Risiko / ok" ein.
     """
     liste = personen if personen is not None else _personen()
-    return [p for p in liste if p.get('aktiv', True) and not _ist_backup(p)]
+    return [p for p in liste
+            if p.get('aktiv', True) and not _ist_backup(p) and not _abgelaufen(p)]
 
 
 def _is_admin(user):
@@ -331,8 +363,11 @@ def _matrix_html(is_admin=False):
         '(nur 1 Person „grün")</span>'
         + (f'<span class="hint" style="margin:0">Gez&auml;hlt werden '
            + ', '.join(_esc(x['name']) for x in zaehlt)
-           + ' &ndash; Backup z&auml;hlt nicht mit.</span>'
-           if any(_ist_backup(x) for x in personen) else '')
+           + '. Nicht gez&auml;hlt: '
+           + ', '.join(f'{_esc(x["name"])} ({_esc(_zaehlt_nicht_grund(x))})'
+                       for x in personen if _zaehlt_nicht_grund(x))
+           + '.</span>'
+           if any(_zaehlt_nicht_grund(x) for x in personen) else '')
         + f'<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">'
         f'{len(aufgaben) - len(krit) - len(risk)} abgedeckt (≥ 2)</span></div>')
 
@@ -343,10 +378,11 @@ def _matrix_html(is_admin=False):
     else:
         kopf = '<th class="auf" style="text-align:left">Aufgabe</th>'
         for p in personen:
-            if _ist_backup(p):
+            grund = _zaehlt_nicht_grund(p)
+            if grund:
                 kopf += (f'<th style="opacity:.7">{_esc(p["name"])}'
                          '<div style="font-size:9px;font-weight:600;letter-spacing:.04em;'
-                         'color:#6d28d9">BACKUP</div></th>')
+                         f'color:#6d28d9">{_esc(grund.upper())}</div></th>')
             else:
                 kopf += f'<th>{_esc(p["name"])}</th>'
         kopf += '<th>grün</th><th>Status</th>'
@@ -507,11 +543,15 @@ def _verwalten_html(meldung='', is_admin=False):
     for i, p in enumerate(personen):
         aktiv = p.get('aktiv', True)
         backup = _ist_backup(p)
+        grund = _zaehlt_nicht_grund(p)
         chip = ('' if aktiv else
                 ' <span class="chip2" style="background:#eef1f4;color:#6b7280">inaktiv</span>')
-        if backup:
+        if grund and aktiv:
             chip += (' <span class="chip2" style="background:#f3e8ff;color:#6d28d9" '
-                     'title="springt ein, zählt aber nicht in die Abdeckung">Backup</span>')
+                     f'title="z&auml;hlt nicht in die Abdeckung">{_esc(grund)}</span>')
+        if p.get('bis') and not _abgelaufen(p):
+            chip += (' <span class="chip2" style="background:#eef1fe;color:#3730a3">bis '
+                     f'{_esc(_datum_de(p.get("bis")))}</span>')
         name_html = (f'<span style="{"" if aktiv else "opacity:.55"}">{_esc(p["name"])}</span>{chip}')
         if is_admin:
             pid = _esc(p['id'])
@@ -528,8 +568,17 @@ def _verwalten_html(meldung='', is_admin=False):
                 '</button></form>'
                 f'<form method="post" action="/person/{pid}/backup" style="display:inline;margin:0">'
                 f'<button class="btn secondary btn-sm" type="submit" '
-                'title="Backup zählt nicht in die Abdeckung">'
-                f'{"kein Backup" if backup else "als Backup"}</button></form>'
+                'title="zählt dann nicht in die Abdeckung">'
+                f'{"z&auml;hlt wieder mit" if backup else "z&auml;hlt nicht"}</button></form>'
+                f'<form method="post" action="/person/{pid}/befristung" '
+                'style="display:inline-flex;gap:4px;margin:0;align-items:center">'
+                f'<input name="hinweis" value="{_esc(p.get("hinweis") or "")}" '
+                'placeholder="Grund" style="width:120px;padding:5px 7px;'
+                'border:1px solid #d5dde5;border-radius:6px;font:inherit;font-size:12px">'
+                f'<input name="bis" type="date" value="{_esc(p.get("bis") or "")}" '
+                'style="padding:5px 7px;border:1px solid #d5dde5;border-radius:6px;'
+                'font:inherit;font-size:12px" title="nur bis zu diesem Tag im Team">'
+                '<button class="btn secondary btn-sm" type="submit">merken</button></form>'
                 f'<form method="post" action="/person/{pid}/loeschen" style="display:inline;margin:0" '
                 'onsubmit="return confirm(\'Person löschen? Auch alle Bewertungen dieser Person.\')">'
                 '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
@@ -1112,6 +1161,24 @@ def person_backup(request: Request, pid: str):
     for p in liste:
         if str(p.get('id')) == str(pid):
             p['backup'] = not p.get('backup')
+            break
+    _sichere(PERSONEN_PATH, liste)
+    return RedirectResponse('/verwalten', status_code=303)
+
+
+@app.post('/person/{pid}/befristung')
+async def person_befristung(request: Request, pid: str):
+    """Grund und Stichtag - ab dem Tag danach zaehlt die Person nicht mehr."""
+    if not _is_admin(getattr(request.state, 'user', None)):
+        return RedirectResponse('/verwalten', status_code=303)
+    form = await request.form()
+    hinweis = ' '.join(str(form.get('hinweis') or '').split())[:60]
+    bis = str(form.get('bis') or '').strip()[:10]
+    liste = _personen()
+    for p in liste:
+        if str(p.get('id')) == str(pid):
+            p['hinweis'] = hinweis
+            p['bis'] = bis
             break
     _sichere(PERSONEN_PATH, liste)
     return RedirectResponse('/verwalten', status_code=303)
