@@ -82,6 +82,23 @@ def _personen(nur_aktiv=False):
     return liste  # Datei-Reihenfolge = Anzeige-Reihenfolge (per Hoch/Runter änderbar)
 
 
+def _ist_backup(p) -> bool:
+    return bool(p.get('backup'))
+
+
+def _zaehlende(personen=None):
+    """Wer zählt für die Abdeckung? Backup-Personen nicht.
+
+    Jörn springt im Notfall ein, ist aber kein Maßstab dafür, ob eine Aufgabe
+    im Team abgedeckt ist. Zählte er mit, sähe jede Aufgabe, die nur er kann,
+    wie erledigt aus - und genau die ist das Risiko. Deshalb steht er weiter
+    in der Matrix (man sieht, dass er es kann), fließt aber nicht in
+    „kritisch / Risiko / ok" ein.
+    """
+    liste = personen if personen is not None else _personen()
+    return [p for p in liste if p.get('aktiv', True) and not _ist_backup(p)]
+
+
 def _is_admin(user):
     return bool(user) and (user.get('role') == 'admin')
 
@@ -295,10 +312,12 @@ def _matrix_html(is_admin=False):
                     f'style="text-decoration:none;display:inline-block">{inner}</a></td>')
         return f'<td>{inner}</td>'
 
-    # Schulungsbedarf: Aufgaben mit < 2 „grün" sind Vertretungsrisiko
+    # Schulungsbedarf: Aufgaben mit < 2 „grün" sind Vertretungsrisiko.
+    # Gezählt wird ohne Backup-Personen - siehe _zaehlende().
+    zaehlt = _zaehlende(personen)
     krit, risk = [], []
     for a in aufgaben:
-        g = sum(1 for p in personen if stufe(a['id'], p['id']) == 'gruen')
+        g = sum(1 for p in zaehlt if stufe(a['id'], p['id']) == 'gruen')
         if g == 0:
             krit.append(a)
         elif g == 1:
@@ -310,8 +329,12 @@ def _matrix_html(is_admin=False):
         '(niemand „grün")</span>'
         f'<span class="chip2" style="background:#fdf3d6;color:#8a5a00">{len(risk)} Risiko '
         '(nur 1 Person „grün")</span>'
-        f'<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">{len(aufgaben) - len(krit) - len(risk)} '
-        'abgedeckt (≥ 2)</span></div>')
+        + (f'<span class="hint" style="margin:0">Gez&auml;hlt werden '
+           + ', '.join(_esc(x['name']) for x in zaehlt)
+           + ' &ndash; Backup z&auml;hlt nicht mit.</span>'
+           if any(_ist_backup(x) for x in personen) else '')
+        + f'<span class="chip2" style="background:#e7f6ec;color:#0f7a3d">'
+        f'{len(aufgaben) - len(krit) - len(risk)} abgedeckt (≥ 2)</span></div>')
 
     if not personen:
         koerper = ('<div class="card"><p class="hint" style="margin:0">Noch keine Teammitglieder. '
@@ -320,7 +343,12 @@ def _matrix_html(is_admin=False):
     else:
         kopf = '<th class="auf" style="text-align:left">Aufgabe</th>'
         for p in personen:
-            kopf += f'<th>{_esc(p["name"])}</th>'
+            if _ist_backup(p):
+                kopf += (f'<th style="opacity:.7">{_esc(p["name"])}'
+                         '<div style="font-size:9px;font-weight:600;letter-spacing:.04em;'
+                         'color:#6d28d9">BACKUP</div></th>')
+            else:
+                kopf += f'<th>{_esc(p["name"])}</th>'
         kopf += '<th>grün</th><th>Status</th>'
 
         # nach Bereich gruppieren (Reihenfolge der ersten Vorkommen)
@@ -337,7 +365,7 @@ def _matrix_html(is_admin=False):
             if b:
                 zeilen += f'<tr><td class="ber" colspan="{n_sp}">{_esc(b)}</td></tr>'
             for a in [x for x in aufgaben if (x.get('bereich') or '').strip() == b]:
-                g = sum(1 for p in personen if stufe(a['id'], p['id']) == 'gruen')
+                g = sum(1 for p in zaehlt if stufe(a['id'], p['id']) == 'gruen')
                 if g == 0:
                     stat = '<span class="chip2" style="background:#fde8e8;color:#a10e0e">kritisch</span>'
                 elif g == 1:
@@ -478,8 +506,12 @@ def _verwalten_html(meldung='', is_admin=False):
     p_zeilen = ''
     for i, p in enumerate(personen):
         aktiv = p.get('aktiv', True)
+        backup = _ist_backup(p)
         chip = ('' if aktiv else
                 ' <span class="chip2" style="background:#eef1f4;color:#6b7280">inaktiv</span>')
+        if backup:
+            chip += (' <span class="chip2" style="background:#f3e8ff;color:#6d28d9" '
+                     'title="springt ein, zählt aber nicht in die Abdeckung">Backup</span>')
         name_html = (f'<span style="{"" if aktiv else "opacity:.55"}">{_esc(p["name"])}</span>{chip}')
         if is_admin:
             pid = _esc(p['id'])
@@ -494,6 +526,10 @@ def _verwalten_html(meldung='', is_admin=False):
                 f'<form method="post" action="/person/{pid}/aktiv" style="display:inline;margin:0">'
                 f'<button class="btn secondary btn-sm" type="submit">{"deaktivieren" if aktiv else "aktivieren"}'
                 '</button></form>'
+                f'<form method="post" action="/person/{pid}/backup" style="display:inline;margin:0">'
+                f'<button class="btn secondary btn-sm" type="submit" '
+                'title="Backup zählt nicht in die Abdeckung">'
+                f'{"kein Backup" if backup else "als Backup"}</button></form>'
                 f'<form method="post" action="/person/{pid}/loeschen" style="display:inline;margin:0" '
                 'onsubmit="return confirm(\'Person löschen? Auch alle Bewertungen dieser Person.\')">'
                 '<button class="btn secondary btn-sm" type="submit">löschen</button></form></div>')
@@ -579,7 +615,7 @@ def _verwalten_html(meldung='', is_admin=False):
 def _verlauf_html(f=''):
     aufgaben = _aufgaben()
     personen = _personen()
-    aktive = [p for p in personen if p.get('aktiv', True)]
+    aktive = _zaehlende(personen)
     bew = _bewertungen()
     hist = _historie()
     pname = {str(p['id']): p.get('name', '?') for p in personen}
@@ -1067,6 +1103,20 @@ def person_runter(request: Request, pid: str):
     return _person_move(request, pid, 'runter')
 
 
+@app.post('/person/{pid}/backup')
+def person_backup(request: Request, pid: str):
+    """Person als Backup markieren - sie zaehlt dann nicht in die Abdeckung."""
+    if not _is_admin(getattr(request.state, 'user', None)):
+        return RedirectResponse('/verwalten', status_code=303)
+    liste = _personen()
+    for p in liste:
+        if str(p.get('id')) == str(pid):
+            p['backup'] = not p.get('backup')
+            break
+    _sichere(PERSONEN_PATH, liste)
+    return RedirectResponse('/verwalten', status_code=303)
+
+
 @app.post('/person/{pid}/loeschen')
 def person_del(request: Request, pid: str):
     if not _is_admin(request.state.user):
@@ -1216,7 +1266,9 @@ def export_xlsx(request: Request):
         for p in personen:
             s = (bew.get(str(a['id'])) or {}).get(str(p['id']), '')
             row.append(AMPEL[s][2] if s in AMPEL else '')
-            if s == 'gruen':
+            # Backup zaehlt nicht in die Abdeckung - sonst sieht eine Aufgabe,
+            # die nur die Vertretung kann, im Export abgedeckt aus.
+            if s == 'gruen' and not _ist_backup(p) and p.get('aktiv', True):
                 g += 1
         status = 'kritisch' if g == 0 else ('Risiko' if g == 1 else 'ok')
         row += [g, status]
