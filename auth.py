@@ -89,7 +89,7 @@ NAV_TOOLS = [
     ("wayfair",    "Wayfair",        "https://wayfair-versandlabels.sliplane.app",      False),
     ("avis",       "Avis",           "https://avis-konverter.sliplane.app",             False),
     ("deltav",     "Delta-V",        "https://deltav-bestandsmeldung.sliplane.app",     True),
-    ("rechner",    "Preisrechner",   "https://containerpreisrechner.sliplane.app",      True),
+    ("rechner",    "Direktlieferung", "https://containerpreisrechner.sliplane.app",     True),
     ("sortiment",  "Sortiment",      "https://sortimentsabgleich.sliplane.app",         True),
     ("schweiz",    "Schweiz Export", "https://schweiz-export.sliplane.app",             False),
     ("stammdaten", "Stammdaten",     "https://haendler-stammdaten.sliplane.app/admin",  True),
