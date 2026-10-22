@@ -86,7 +86,7 @@ NAV_TOOLS = [
     ("hfn",        "HFN",            "https://hfn-bestellanlage.sliplane.app",          False),
     ("viking",     "Viking",         "https://viking-bestand.sliplane.app",             False),
     ("cb",         "CB-Web",         "https://cb-web-bestellanlage-lager.sliplane.app", False),
-    ("wayfair",    "Wayfair",        "https://wayfair-versandlabels.sliplane.app",      False),
+    ("wayfair",    "Versandlabels",  "https://wayfair-versandlabels.sliplane.app",      False),
     ("avis",       "Avis",           "https://avis-konverter.sliplane.app",             False),
     ("deltav",     "Delta-V",        "https://deltav-bestandsmeldung.sliplane.app",     True),
     ("rechner",    "Direktlieferung", "https://containerpreisrechner.sliplane.app",     True),
