@@ -88,7 +88,7 @@ NAV_TOOLS = [
     ("cb",         "CB-Web",         "https://cb-web-bestellanlage-lager.sliplane.app", False),
     ("wayfair",    "Versandlabels",  "https://wayfair-versandlabels.sliplane.app",      False),
     ("avis",       "Avis",           "https://avis-konverter.sliplane.app",             False),
-    ("deltav",     "Delta-V",        "https://deltav-bestandsmeldung.sliplane.app",     True),
+    ("deltav",     "Delta-V",        "https://deltav-bestandsmeldung.sliplane.app",     False),
     ("rechner",    "Direktlieferung", "https://containerpreisrechner.sliplane.app",     True),
     ("sortiment",  "Sortiment",      "https://sortimentsabgleich.sliplane.app",         True),
     ("schweiz",    "Schweiz Export", "https://schweiz-export.sliplane.app",             False),
