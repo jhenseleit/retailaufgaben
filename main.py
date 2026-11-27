@@ -194,11 +194,14 @@ async def ra_middleware(request, call_next):
     if user:
         return await call_next(request)
     if request.method == 'GET':
-        return RedirectResponse('/login', status_code=303)
+        return RedirectResponse(auth.login_path(request), status_code=303)
     return JSONResponse(status_code=401, content={'detail': 'Nicht angemeldet.'})
 
 
 app.add_middleware(BaseHTTPMiddleware, dispatch=ra_middleware)
+# Einmal anmelden über die Übersicht (Ticket einlösen, /login -> Portal).
+# Zuletzt registriert = äußerste Middleware.
+app.add_middleware(BaseHTTPMiddleware, dispatch=auth.sso_gate)
 
 
 @app.get('/login', response_class=HTMLResponse)

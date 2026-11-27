@@ -39,6 +39,7 @@ Umgebungsvariablen:
     APP_NAME        Anzeigename für die Login-Seite (optional)
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -59,7 +60,12 @@ SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))
 _SECRET = (os.environ.get("AUTH_SECRET") or "dev-only-insecure-secret").encode()
 
 IS_PORTAL = os.environ.get("WERKBANK_PORTAL", "").strip().lower() not in ("", "0", "false", "no")
-PORTAL_URL = (os.environ.get("PORTAL_URL", "") or "").strip().rstrip("/")
+# Portal-Adresse für die Anmeldung. Eine eigene Domain (werkbank.skyport-group.de)
+# ist noch nicht live - deshalb gilt ein gesetztes PORTAL_URL nur, wenn es auf
+# *.sliplane.app (oder lokal) zeigt; sonst die bekannte Übersicht.
+_PORTAL_ENV = (os.environ.get("PORTAL_URL", "") or "").strip().rstrip("/")
+PORTAL_URL = (_PORTAL_ENV if any(x in _PORTAL_ENV for x in (".sliplane.app", "localhost", "127.0.0.1"))
+              else ("" if IS_PORTAL else "https://skyport-werkbank.sliplane.app"))
 COOKIE_DOMAIN = (os.environ.get("COOKIE_DOMAIN", "") or "").strip() or None
 _DOMAIN_ROOT = COOKIE_DOMAIN.lstrip(".") if COOKIE_DOMAIN else None
 APP_NAME = os.environ.get("APP_NAME", "Skyport Werkbank")
@@ -94,6 +100,179 @@ NAV_TOOLS = [
     ("schweiz",    "Schweiz Export", "https://schweiz-export.sliplane.app",             False),
     ("stammdaten", "Stammdaten",     "https://haendler-stammdaten.sliplane.app/admin",  True),
 ]
+
+# ─── Einmal anmelden (SSO über die Übersicht) ───────────────────────────────
+# Jedes Werkzeug läuft unter einer eigenen *.sliplane.app-Adresse; Cookies
+# lassen sich dort nicht teilen. Deshalb meldet man sich NUR im Portal an.
+# Jeder Klick auf eine Kachel oder einen Nav-Eintrag läuft über
+# PORTAL_URL/go?to=<Ziel>. Das Portal hängt ein kurzlebiges, signiertes Ticket
+# an (Ziel/sso?t=…); das Werkzeug prüft es mit dem gemeinsamen AUTH_SECRET und
+# setzt seinen eigenen Session-Cookie (gleiches Ablaufdatum wie im Portal).
+# Wer ein Werkzeug ohne Anmeldung öffnet, landet beim Portal-Login und kommt
+# danach automatisch zurück. Tickets gibt es nur für die Hosts unten, und für
+# Nur-Admin-Werkzeuge nur an die Rolle "admin".
+SSO_EXTRA = [
+    ("kundenkompass",  "https://kundenkompass.sliplane.app",         True),
+    ("branchenradar",  "https://branchenradar.sliplane.app",         True),
+    ("retailaufgaben", "https://retailaufgaben.sliplane.app",        False),
+    ("kundenanalyse",  "https://skyport-kundenanalyse.sliplane.app", True),
+]
+TICKET_SECONDS = 120
+_TICKET_KEY = hmac.new(_SECRET, b"werkbank-sso-ticket", hashlib.sha256).digest()
+
+
+def _sso_hosts():
+    """Hostname -> admin_only für alle Werkzeuge, die ein Ticket bekommen dürfen."""
+    hosts = {}
+    rows = [(u, a) for _k, _l, u, a in NAV_TOOLS if _k != "portal"]
+    rows += [(u, a) for _k, u, a in SSO_EXTRA]
+    for url, admin_only in rows:
+        h = (urlparse(url).hostname or "").lower()
+        if h:
+            hosts[h] = hosts.get(h, False) or admin_only
+    for h in os.environ.get("SSO_HOSTS", "").split(","):  # z. B. lokale Tests
+        h = h.strip().lower()
+        if h:
+            hosts.setdefault(h, False)
+    return hosts
+
+
+def _b64e(s):
+    return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+
+
+def _b64d(s):
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode()
+
+
+def _ticket_sig(payload):
+    return hmac.new(_TICKET_KEY, payload.encode(), hashlib.sha256).hexdigest()
+
+
+def create_ticket(user, host, session_exp):
+    exp = int(time.time()) + TICKET_SECONDS
+    payload = "|".join(("sso", user["email"], user["role"], str(int(session_exp)),
+                        host.lower(), str(exp)))
+    return _b64e(payload) + "." + _ticket_sig(payload)
+
+
+def verify_ticket(ticket, host):
+    try:
+        b, sig = (ticket or "").rsplit(".", 1)
+        payload = _b64d(b)
+        tag, email, role, sess_exp, t_host, exp = payload.split("|")
+        now = int(time.time())
+        if tag != "sso" or not hmac.compare_digest(_ticket_sig(payload), sig):
+            return None
+        if int(exp) < now or int(sess_exp) < now or t_host != (host or "").lower():
+            return None
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+    if role not in ("admin", "retail"):
+        return None
+    return {"email": email, "role": role, "exp": int(sess_exp)}
+
+
+def portal_link(url):
+    """Kachel-/Nav-Link: über PORTAL/go, wenn das Ziel SSO kann, sonst unverändert."""
+    h = (urlparse(url).hostname or "").lower()
+    if h not in _sso_hosts():
+        return url
+    return ("" if IS_PORTAL else PORTAL_URL) + "/go?to=" + quote(url, safe="")
+
+
+def _sso_target(to, user, request):
+    """Ticket-URL für ein erlaubtes Werkzeug - sonst None."""
+    try:
+        p = urlparse(to or "")
+        port = p.port
+    except ValueError:
+        return None
+    h = (p.hostname or "").lower()
+    hosts = _sso_hosts()
+    if p.scheme not in ("http", "https") or h not in hosts:
+        return None
+    if hosts[h] and user.get("role") != "admin":
+        return None
+    try:
+        sess_exp = int(request.cookies.get(COOKIE_NAME, "").rsplit("|", 3)[2])
+    except (ValueError, IndexError):
+        sess_exp = int(time.time()) + SESSION_HOURS * 3600
+    local = h in ("localhost", "127.0.0.1")
+    scheme = p.scheme if local else "https"
+    netloc = h + (":" + str(port) if port else "")
+    nxt = (p.path or "/") + (("?" + p.query) if p.query else "")
+    return (scheme + "://" + netloc + "/sso?t=" + quote(create_ticket(user, h, sess_exp))
+            + "&next=" + quote(nxt, safe=""))
+
+
+def _go_handler(request):
+    """Portal: angemeldeten Nutzer mit Ticket ins Werkzeug weiterreichen."""
+    to = request.query_params.get("to", "")
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login?next=" + quote("/go?to=" + quote(to, safe=""), safe=""),
+                                status_code=303)
+    return RedirectResponse(_sso_target(to, user, request) or "/", status_code=303)
+
+
+def _self_base(request):
+    h = request.headers.get("host") or request.url.netloc
+    local = h.split(":")[0] in ("localhost", "127.0.0.1")
+    return (request.url.scheme if local else "https") + "://" + h
+
+
+def _rel(nxt):
+    return nxt if (nxt and nxt.startswith("/") and not nxt.startswith("//")) else None
+
+
+def _to_portal_login(request, nxt=None):
+    """Modul: nicht angemeldet -> Portal-Login, danach zurück an dieselbe Stelle."""
+    if nxt is None:
+        nxt = request.url.path + (("?" + request.url.query) if request.url.query else "")
+    return RedirectResponse(PORTAL_URL + "/login?next=" + quote(_self_base(request) + nxt, safe=""),
+                            status_code=303)
+
+
+def login_path(request):
+    """Für eigene Middlewares: /login mit Rücksprung an die aktuelle Seite."""
+    q = ("?" + request.url.query) if request.url.query else ""
+    return "/login?next=" + quote(request.url.path + q, safe="")
+
+
+def _sso_handler(request):
+    """Modul: Ticket aus dem Portal einlösen -> eigener Session-Cookie."""
+    user = verify_ticket(request.query_params.get("t", ""), _host(request))
+    nxt = _rel(request.query_params.get("next")) or "/"
+    if not user:
+        return HTMLResponse(login_page_html(
+            APP_NAME, error="Die automatische Anmeldung hat nicht geklappt. Bitte "
+                            "hier anmelden oder das Werkzeug erneut über die Übersicht öffnen.",
+            next_url=nxt), status_code=401)
+    resp = RedirectResponse(nxt, status_code=303)
+    _set_session_cookie(resp, request, create_token(user["email"], user["role"], exp=user["exp"]))
+    return resp
+
+
+async def sso_gate(request, call_next):
+    """Für Werkzeuge mit EIGENER Zugangs-Middleware (statt auth_middleware):
+    als äußerste Middleware registrieren. Löst Tickets ein, schickt /login zum
+    Portal und meldet beim Abmelden auch im Portal ab."""
+    path = request.url.path
+    if IS_PORTAL:
+        return await call_next(request)
+    if path == "/sso":
+        return _sso_handler(request)
+    if path == "/logout":
+        return _do_logout(request)
+    if (path == "/login" and request.method in ("GET", "HEAD") and PORTAL_URL
+            and not request.query_params.get("lokal")):
+        nxt = _rel(request.query_params.get("next"))
+        if get_current_user(request):
+            return RedirectResponse(nxt or "/", status_code=303)
+        return _to_portal_login(request, nxt or "/")
+    return await call_next(request)
+
 
 # Erkennt anhand des Hosts den aktiven Nav-Eintrag (Regex-Ersatz der Leiste).
 _NAV_RE = re.compile(r'<nav class="switch"[^>]*>.*?</nav>', re.DOTALL)
@@ -250,8 +429,8 @@ def _sign(payload):
     return hmac.new(_SECRET, payload.encode(), hashlib.sha256).hexdigest()
 
 
-def create_token(email, role):
-    exp = int(time.time()) + SESSION_HOURS * 3600
+def create_token(email, role, exp=None):
+    exp = int(exp) if exp else int(time.time()) + SESSION_HOURS * 3600
     payload = email + "|" + role + "|" + str(exp)
     return payload + "|" + _sign(payload)
 
@@ -319,7 +498,18 @@ def _safe_next(next_url):
         h = p.hostname.lower()
         if _DOMAIN_ROOT and (h == _DOMAIN_ROOT or h.endswith("." + _DOMAIN_ROOT)):
             return next_url
+        if h in _sso_hosts():
+            return next_url
     return None
+
+
+def _after_login(nxt):
+    """Ziel nach der Anmeldung: relative Pfade direkt, Werkzeuge per Ticket."""
+    if not nxt:
+        return "/"
+    if nxt.startswith("/"):
+        return nxt
+    return ("/go?to=" + quote(nxt, safe="")) if IS_PORTAL else "/"
 
 
 # ─── Middleware: bedient die Anmeldung selbst ───────────────────────────────
@@ -373,6 +563,8 @@ async def auth_middleware(request, call_next):
         return _do_logout(request)
 
     if IS_PORTAL:
+        if path == "/go":
+            return _go_handler(request)
         if path == "/login":
             return await _login_handler(request)
         if path == "/setup":
@@ -384,26 +576,28 @@ async def auth_middleware(request, call_next):
         return RedirectResponse("/login?next=" + quote(str(request.url)), status_code=303)
 
     # ── Modul-Modus ──
+    if path == "/sso":
+        return _sso_handler(request)
     if path in ("/setup", "/konto"):
         # Passwort-Verwaltung gibt es nur zentral im Portal.
-        if PORTAL_URL and _on_shared_domain(request):
-            return RedirectResponse(PORTAL_URL + path, status_code=303)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse((PORTAL_URL + path) if PORTAL_URL else "/", status_code=303)
     if get_current_user(request):
         return await _serve(request, call_next)
-    if PORTAL_URL and _on_shared_domain(request):
-        return RedirectResponse(PORTAL_URL + "/login?next=" + quote(str(request.url)),
-                                status_code=303)
-    # Fallback (noch nicht unter gemeinsamer Domain): lokaler Login.
-    if path == "/login":
+    # Lokaler Login nur noch als Rückfallebene (POST oder /login?lokal=1).
+    if path == "/login" and (request.method == "POST" or request.query_params.get("lokal")
+                             or not PORTAL_URL):
         return await _login_handler(request)
+    if PORTAL_URL:
+        if path == "/login":
+            return _to_portal_login(request, _rel(request.query_params.get("next")) or "/")
+        return _to_portal_login(request)
     return RedirectResponse("/login", status_code=303)
 
 
 def _do_logout(request):
     target = "/login"
-    if not IS_PORTAL and PORTAL_URL and _on_shared_domain(request):
-        target = PORTAL_URL + "/login"
+    if not IS_PORTAL and PORTAL_URL:
+        target = PORTAL_URL + "/logout"
     resp = RedirectResponse(target, status_code=303)
     _clear_session_cookie(resp, request)
     return resp
@@ -419,13 +613,13 @@ async def _login_handler(request):
                                 next_url=_safe_next(form.get("next"))),
                 status_code=401)
         token = create_token(user["email"], user["role"])
-        target = _safe_next(form.get("next")) or "/"
+        target = _after_login(_safe_next(form.get("next")))
         resp = RedirectResponse(target, status_code=303)
         _set_session_cookie(resp, request, token)
         return resp
     nxt = _safe_next(request.query_params.get("next"))
     if get_current_user(request):
-        return RedirectResponse(nxt or "/", status_code=303)
+        return RedirectResponse(_after_login(nxt), status_code=303)
     return HTMLResponse(login_page_html(APP_NAME, next_url=nxt))
 
 
@@ -516,7 +710,11 @@ def nav_html(active_key="", user=None):
             continue
         if key == active_key:
             continue  # aktuelles Modul nicht in der Leiste auflisten
-        links.append('<a href="' + url + '">' + label + '</a>')
+        if key == "portal":
+            href = "/" if IS_PORTAL else (PORTAL_URL or url)
+        else:
+            href = portal_link(url)
+        links.append('<a href="' + href + '">' + label + '</a>')
     return '<nav class="switch">' + "".join(links) + '</nav>'
 
 
